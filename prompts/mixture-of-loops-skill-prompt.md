@@ -1,6 +1,6 @@
-# Agent prompt: design the autonomous mixture-of-tasks skill
+# Agent prompt: design the autonomous mixture-of-loops skill
 
-Enhance `/root/wiggum/roadmap/speckit-pipeline-skill.md` into an implementation-ready design for a reusable skill named **mixture-of-tasks**.
+Enhance `/root/wiggum/roadmap/speckit-pipeline-skill.md` into an implementation-ready design for a reusable skill named **mixture-of-loops**.
 
 The intended user experience is:
 
@@ -22,7 +22,7 @@ Autonomous execution must terminate truthfully: complete successfully, recover a
 
 Edit **only** `/root/wiggum/roadmap/speckit-pipeline-skill.md` in place. This is a design assignment: the executable script, skill package, helpers, schemas, and tests described below are deliverables of the **future skill or its implementation**, not files to create now. Include their examples inside the roadmap. Do not implement or install the skill, run pipelines or model backends, provision infrastructure, or change specifications and approval records. Read-only research and isolated checks of design examples are allowed when they do not trigger those actions.
 
-Keep the existing roadmap filename so references continue to work, but use `mixture-of-tasks` for the proposed skill, package, invocation examples, and new artifact names. Preserve unrelated working-tree changes. Keep Wiggum as the execution target; another orchestrator, task router, SDK, or scheduler is outside this assignment.
+Keep the existing roadmap filename so references continue to work, but use `mixture-of-loops` for the proposed skill, package, invocation examples, and new artifact names. Preserve unrelated working-tree changes. Keep Wiggum as the execution target; another orchestrator, task router, SDK, or scheduler is outside this assignment.
 
 ## Establish the current behavior
 
@@ -74,8 +74,8 @@ Use one canonical `SKILL.md` with shared `name` and `description` frontmatter, p
 
 Document discovery and invocation for both hosts:
 
-- Codex: `.agents/skills/mixture-of-tasks/`, invoked with `$mixture-of-tasks`.
-- Claude Code: `.claude/skills/mixture-of-tasks/`, invoked with `/mixture-of-tasks`.
+- Codex: `.agents/skills/mixture-of-loops/`, invoked with `$mixture-of-loops`.
+- Claude Code: `.claude/skills/mixture-of-loops/`, invoked with `/mixture-of-loops`.
 
 Choose a canonical package location in Wiggum and show how both discovery paths reference it, including installation or linking for a separate repository such as AgentFlow. Specify helper resolution through links, behavior when the package moves or a link breaks, and how to avoid divergent copies or duplicate discovery. Keep host-specific metadata optional. Core behavior must not depend on Claude-only substitutions, hooks, or subagent APIs, or on Codex-only tool names. State the supported local-host/platform scope; do not infer cloud or Windows compatibility from local installation alone.
 

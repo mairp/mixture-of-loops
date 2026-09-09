@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/mixture-of-tasks/launch-contract-1.0.schema.json",
-  "title": "Mixture of Tasks launch contract",
+  "$id": "https://local.invalid/mixture-of-loops/launch-contract-1.0.schema.json",
+  "title": "Mixture of Loops launch contract",
   "type": "object",
   "additionalProperties": false,
   "required": [

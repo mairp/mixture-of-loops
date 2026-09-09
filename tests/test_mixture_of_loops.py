@@ -11,7 +11,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "mixture-of-tasks"
+SKILL = ROOT / "skills" / "mixture-of-loops"
 SCRIPTS = SKILL / "scripts"
 
 
@@ -63,7 +63,7 @@ def base_contract(repository: Path, source: Path, stages: list[dict]) -> dict:
     }
 
 
-class MixtureOfTasksTests(unittest.TestCase):
+class MixtureOfLoopsTests(unittest.TestCase):
     def test_bootstrap_inventory_and_semantic_staleness(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
@@ -155,13 +155,13 @@ class MixtureOfTasksTests(unittest.TestCase):
             dry = run(launcher, "--implement", "--smoke", "--dry-run", cwd=repository)
             self.assertEqual(dry.returncode, 0, dry.stdout)
             self.assertFalse((repository / "done").exists())
-            self.assertFalse((repository / ".mixture-of-tasks" / "runs").exists())
+            self.assertFalse((repository / ".mixture-of-loops" / "runs").exists())
 
             executed = run(launcher, "--no-color", cwd=repository)
             self.assertEqual(executed.returncode, 0, executed.stdout)
             self.assertTrue((repository / "done").is_file())
             state = json.loads(
-                (repository / ".mixture-of-tasks" / "runs" / "fixture-pipeline" / "state.json").read_text()
+                (repository / ".mixture-of-loops" / "runs" / "fixture-pipeline" / "state.json").read_text()
             )
             self.assertEqual(state["state"], "completed")
 
@@ -321,8 +321,8 @@ class MixtureOfTasksTests(unittest.TestCase):
             result = run(onboard, "--harness", "all", "--scope", "repo", "--repo", repository)
             self.assertEqual(result.returncode, 0, result.stdout)
             for relative in (
-                ".agents/skills/mixture-of-tasks",
-                ".claude/skills/mixture-of-tasks",
+                ".agents/skills/mixture-of-loops",
+                ".claude/skills/mixture-of-loops",
             ):
                 target = repository / relative
                 self.assertTrue(target.is_symlink())

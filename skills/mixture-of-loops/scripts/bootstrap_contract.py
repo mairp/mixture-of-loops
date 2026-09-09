@@ -293,7 +293,7 @@ def build_contract(root: Path, features: list[Path]) -> dict:
         "schema_version": "1.0",
         "id": identifier,
         "status": "draft",
-        "generated_by": {"tool": "mixture-of-tasks/bootstrap_contract.py", "version": "1.0"},
+        "generated_by": {"tool": "mixture-of-loops/bootstrap_contract.py", "version": "1.0"},
         "repository": {"root": str(root), "revision": revision, "dirty": dirty},
         "authorized_roots": [str(root)],
         "features": feature_records,

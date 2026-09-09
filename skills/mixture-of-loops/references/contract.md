@@ -89,7 +89,7 @@ ambiguous Wiggum outcomes, include a correlated JSONL reason constraint. A retry
 ## Generated bundle
 
 `render_launcher.py` publishes a content-addressed bundle below
-`.mixture-of-tasks/generated/<id>/<contract-hash>/` and atomically replaces the stable
+`.mixture-of-loops/generated/<id>/<contract-hash>/` and atomically replaces the stable
 launcher last. The bundle contains the exact contract and runtime. An interrupted render
 therefore leaves the previous launcher pointing at a complete previous bundle.
 
@@ -98,7 +98,7 @@ maintained changes in the contract or choose a different output path; use
 `--replace-edited` only as an explicit regeneration decision.
 
 At execution time the runtime stores plain logs and JSON state below
-`.mixture-of-tasks/runs/<id>/`. It revalidates the contract sources, obtains a nonblocking
+`.mixture-of-loops/runs/<id>/`. It revalidates the contract sources, obtains a nonblocking
 pipeline lock, validates completed-stage postconditions, and resumes from the first stage
 whose postconditions no longer hold. State is bound to a semantic contract digest; task
 checkbox progress is normalized, while a changed requirement, stage, policy, or source

@@ -35,7 +35,7 @@ case "$HARNESS" in codex|claude|dsh|all) ;; *) echo "onboard-skill: --harness is
 case "$SCOPE" in user|repo) ;; *) echo "onboard-skill: --scope user|repo is required" >&2; exit 2 ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_DIR="$(cd "$SCRIPT_DIR/../skills/mixture-of-tasks" && pwd)"
+SOURCE_DIR="$(cd "$SCRIPT_DIR/../skills/mixture-of-loops" && pwd)"
 [[ -f "$SOURCE_DIR/SKILL.md" ]] || { echo "onboard-skill: missing $SOURCE_DIR/SKILL.md" >&2; exit 3; }
 
 if [[ "$SCOPE" == repo ]]; then
@@ -45,12 +45,12 @@ fi
 
 target_for() {
   case "$1:$SCOPE" in
-    codex:user) printf '%s\n' "${HOME:?}/.agents/skills/mixture-of-tasks" ;;
-    claude:user) printf '%s\n' "${HOME:?}/.claude/skills/mixture-of-tasks" ;;
-    dsh:user) printf '%s\n' "${DSH_HOME:-${HOME:?}/.dsh}/skills/mixture-of-tasks" ;;
-    codex:repo) printf '%s\n' "$REPO/.agents/skills/mixture-of-tasks" ;;
-    claude:repo) printf '%s\n' "$REPO/.claude/skills/mixture-of-tasks" ;;
-    dsh:repo) printf '%s\n' "$REPO/.dsh/skills/mixture-of-tasks" ;;
+    codex:user) printf '%s\n' "${HOME:?}/.agents/skills/mixture-of-loops" ;;
+    claude:user) printf '%s\n' "${HOME:?}/.claude/skills/mixture-of-loops" ;;
+    dsh:user) printf '%s\n' "${DSH_HOME:-${HOME:?}/.dsh}/skills/mixture-of-loops" ;;
+    codex:repo) printf '%s\n' "$REPO/.agents/skills/mixture-of-loops" ;;
+    claude:repo) printf '%s\n' "$REPO/.claude/skills/mixture-of-loops" ;;
+    dsh:repo) printf '%s\n' "$REPO/.dsh/skills/mixture-of-loops" ;;
   esac
 }
 

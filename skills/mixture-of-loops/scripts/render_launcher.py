@@ -57,7 +57,7 @@ def write_atomic_file(path: Path, content: bytes, mode: int) -> None:
 def publish_bundle(contract: dict, output: Path, scripts_dir: Path) -> tuple[Path, str]:
     contract_content = canonical_bytes(contract)
     contract_hash = hashlib.sha256(contract_content).hexdigest()
-    bundle_parent = output.parent / ".mixture-of-tasks" / "generated" / contract["id"]
+    bundle_parent = output.parent / ".mixture-of-loops" / "generated" / contract["id"]
     bundle = bundle_parent / contract_hash[:20]
     bundle_parent.mkdir(parents=True, exist_ok=True)
     if bundle.exists():
@@ -87,7 +87,7 @@ def publish_bundle(contract: dict, output: Path, scripts_dir: Path) -> tuple[Pat
 def launcher_text(output: Path, bundle: Path, contract_hash: str) -> str:
     relative = os.path.relpath(bundle, output.parent)
     template = f"""#!/usr/bin/env bash
-# mixture-of-tasks-generated: renderer=1.0 contract-sha256={contract_hash}
+# mixture-of-loops-generated: renderer=1.0 contract-sha256={contract_hash}
 # generated-content-sha256: {PLACEHOLDER}
 set -euo pipefail
 SCRIPT_DIR=\"$(cd \"$(dirname \"${{BASH_SOURCE[0]}}\")\" && pwd)\"

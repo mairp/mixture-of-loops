@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a mixture-of-tasks launch contract and its source bindings."""
+"""Validate a mixture-of-loops launch contract and its source bindings."""
 
 from __future__ import annotations
 

@@ -1,11 +1,11 @@
-# mixture-of-tasks
+# mixture-of-loops
 
-`mixture-of-tasks` is one maintained Agent Skills package for Claude Code, Codex,
+`mixture-of-loops` is one maintained Agent Skills package for Claude Code, Codex,
 and DeepSeek Harness (dsh). It reads Spec Kit feature artifacts holistically and
 generates a provenance-bound launch contract plus an executable, unattended Wiggum
 pipeline.
 
-The canonical skill is [skills/mixture-of-tasks/SKILL.md](skills/mixture-of-tasks/SKILL.md).
+The canonical skill is [skills/mixture-of-loops/SKILL.md](skills/mixture-of-loops/SKILL.md).
 All three harnesses should link to that directory so fixes do not drift between copies.
 
 ## Use
@@ -14,10 +14,10 @@ Invoke the skill from a repository that contains one or more Spec Kit feature di
 
 ```text
 # Codex
-$mixture-of-tasks derive a pipeline for specs/007-example
+$mixture-of-loops derive a pipeline for specs/007-example
 
 # Claude Code or dsh
-/mixture-of-tasks derive a pipeline for specs/007-example
+/mixture-of-loops derive a pipeline for specs/007-example
 ```
 
 The skill inventories the supplied feature artifacts, records their provenance in a launch
@@ -65,9 +65,9 @@ The targets are:
 
 | Harness | User scope | Repository scope | Invocation |
 | --- | --- | --- | --- |
-| Codex | `~/.agents/skills/mixture-of-tasks` | `.agents/skills/mixture-of-tasks` | `$mixture-of-tasks` |
-| Claude Code | `~/.claude/skills/mixture-of-tasks` | `.claude/skills/mixture-of-tasks` | `/mixture-of-tasks` |
-| dsh | `${DSH_HOME:-~/.dsh}/skills/mixture-of-tasks` | `.dsh/skills/mixture-of-tasks` | `/mixture-of-tasks` |
+| Codex | `~/.agents/skills/mixture-of-loops` | `.agents/skills/mixture-of-loops` | `$mixture-of-loops` |
+| Claude Code | `~/.claude/skills/mixture-of-loops` | `.claude/skills/mixture-of-loops` | `/mixture-of-loops` |
+| dsh | `${DSH_HOME:-~/.dsh}/skills/mixture-of-loops` | `.dsh/skills/mixture-of-loops` | `/mixture-of-loops` |
 
 Codex and Claude Code both document symlinked skill folders. Codex scans `.agents/skills`
 from the working directory to the repository root and `~/.agents/skills`; Claude Code
@@ -90,11 +90,11 @@ directory. Do not keep copied harness variants: change the canonical package and
 three harnesses read it through their links.
 
 Codex normally detects changes automatically; restart if the skill does not appear. In
-Claude Code, use `/skills` and then `/mixture-of-tasks`. In dsh, invoke it in the prompt,
+Claude Code, use `/skills` and then `/mixture-of-loops`. In dsh, invoke it in the prompt,
 for example:
 
 ```bash
-dsh --profile headless "/mixture-of-tasks derive a pipeline for specs/007-example"
+dsh --profile headless "/mixture-of-loops derive a pipeline for specs/007-example"
 ```
 
 ## Develop and validate

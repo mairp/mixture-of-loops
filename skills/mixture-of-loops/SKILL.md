@@ -1,9 +1,9 @@
 ---
-name: mixture-of-tasks
+name: mixture-of-loops
 description: Derive a complete, unattended Wiggum pipeline from one or more Spec Kit feature sets. Use when asked to turn spec.md, plan.md, tasks.md, verification declarations, dependencies, prerequisites, or release gates into a provenance-bound launch contract and executable run script.
 ---
 
-# Mixture of Tasks
+# Mixture of Loops
 
 Generate an inspectable pipeline from the repository's actual Spec Kit artifacts. The
 pipeline must finish, recover within declared bounds, or fail with evidence while stdin
