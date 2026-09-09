@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: onboard-skill --harness codex|claude|dsh|all --scope user|repo [options]
+
+Options:
+  --repo DIR   Repository for --scope repo (default: current directory)
+  --check      Verify the expected link without changing the filesystem
+  --repair     Replace an existing symlink that points somewhere else
+  -h, --help   Show this help
+EOF
+}
+
+HARNESS=""
+SCOPE=""
+REPO="$PWD"
+CHECK=false
+REPAIR=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --harness) HARNESS="${2:?missing harness}"; shift 2 ;;
+    --scope) SCOPE="${2:?missing scope}"; shift 2 ;;
+    --repo) REPO="${2:?missing repository}"; shift 2 ;;
+    --check) CHECK=true; shift ;;
+    --repair) REPAIR=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "onboard-skill: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$HARNESS" in codex|claude|dsh|all) ;; *) echo "onboard-skill: --harness is required" >&2; exit 2 ;; esac
+case "$SCOPE" in user|repo) ;; *) echo "onboard-skill: --scope user|repo is required" >&2; exit 2 ;; esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="$(cd "$SCRIPT_DIR/../skills/mixture-of-tasks" && pwd)"
+[[ -f "$SOURCE_DIR/SKILL.md" ]] || { echo "onboard-skill: missing $SOURCE_DIR/SKILL.md" >&2; exit 3; }
+
+if [[ "$SCOPE" == repo ]]; then
+  [[ -d "$REPO" ]] || { echo "onboard-skill: repository is not a directory: $REPO" >&2; exit 3; }
+  REPO="$(cd "$REPO" && pwd)"
+fi
+
+target_for() {
+  case "$1:$SCOPE" in
+    codex:user) printf '%s\n' "${HOME:?}/.agents/skills/mixture-of-tasks" ;;
+    claude:user) printf '%s\n' "${HOME:?}/.claude/skills/mixture-of-tasks" ;;
+    dsh:user) printf '%s\n' "${DSH_HOME:-${HOME:?}/.dsh}/skills/mixture-of-tasks" ;;
+    codex:repo) printf '%s\n' "$REPO/.agents/skills/mixture-of-tasks" ;;
+    claude:repo) printf '%s\n' "$REPO/.claude/skills/mixture-of-tasks" ;;
+    dsh:repo) printf '%s\n' "$REPO/.dsh/skills/mixture-of-tasks" ;;
+  esac
+}
+
+install_one() {
+  local harness="$1" target actual
+  target="$(target_for "$harness")"
+  if [[ -L "$target" ]]; then
+    actual="$(readlink -f "$target" 2>/dev/null || true)"
+    if [[ "$actual" == "$SOURCE_DIR" ]]; then
+      printf '%s: ok -> %s\n' "$harness" "$SOURCE_DIR"
+      return 0
+    fi
+    if [[ "$REPAIR" == true && "$CHECK" == false ]]; then
+      unlink "$target"
+    else
+      echo "$harness: existing link points elsewhere: $target -> $(readlink "$target")" >&2
+      return 4
+    fi
+  fi
+  if [[ -e "$target" ]]; then
+    echo "$harness: refusing to replace existing path: $target" >&2
+    return 4
+  fi
+  if [[ "$CHECK" == true ]]; then
+    echo "$harness: missing: $target" >&2
+    return 5
+  fi
+  mkdir -p "$(dirname "$target")"
+  ln -s "$SOURCE_DIR" "$target"
+  printf '%s: linked %s -> %s\n' "$harness" "$target" "$SOURCE_DIR"
+}
+
+if [[ "$HARNESS" == all ]]; then
+  install_one codex
+  install_one claude
+  if [[ "$SCOPE" == repo || "${DSH_AGENTS_HOME:-${HOME:?}/.agents}" == "${HOME:?}/.agents" ]]; then
+    echo "dsh: shared through the Codex-compatible .agents/skills link (one discovery entry)"
+  else
+    install_one dsh
+  fi
+else
+  install_one "$HARNESS"
+fi

@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""Shared launch-contract loading and validation."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+
+
+SCHEMA_VERSION = "1.0"
+ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+KINDS = {"setup", "decision", "command", "wiggum", "smoke"}
+CHECKS = {
+    "file_exists",
+    "dir_exists",
+    "env_set",
+    "command_available",
+    "command_success",
+    "json_field_equals",
+}
+DISPOSITIONS = {"mapped", "optional", "out-of-scope", "unresolved", "unsupported"}
+SENSITIVE_ENV = re.compile(r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:$|_)", re.I)
+
+
+class ContractError(Exception):
+    pass
+
+
+class StaleSourceError(ContractError):
+    pass
+
+
+def load_contract(path: str | os.PathLike[str]) -> dict:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ContractError(f"cannot read contract: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ContractError("contract must be a JSON object")
+    return value
+
+
+def _require(condition: bool, message: str, errors: list[str]) -> None:
+    if not condition:
+        errors.append(message)
+
+
+def resolve_path(value: str, root: Path) -> Path:
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def _inside(path: Path, roots: list[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _validate_action(action: object, label: str, errors: list[str]) -> None:
+    _require(isinstance(action, dict), f"{label} must be an object", errors)
+    if not isinstance(action, dict):
+        return
+    argv = action.get("argv")
+    _require(
+        isinstance(argv, list) and bool(argv) and all(isinstance(item, str) and item for item in argv),
+        f"{label}.argv must be a nonempty string array",
+        errors,
+    )
+    if isinstance(argv, list):
+        _require(all("\n" not in item and "\x00" not in item for item in argv if isinstance(item, str)),
+                 f"{label}.argv cannot contain newlines or NUL", errors)
+        if len(argv) >= 2 and Path(str(argv[0])).name in {"sh", "bash", "zsh", "dash"}:
+            _require(argv[1] not in {"-c", "-lc"}, f"{label} cannot execute a shell command string", errors)
+    timeout = action.get("timeout_seconds", 3600)
+    _require(isinstance(timeout, int) and timeout > 0, f"{label}.timeout_seconds must be positive", errors)
+    env = action.get("env", {})
+    _require(isinstance(env, dict), f"{label}.env must be an object", errors)
+    if isinstance(env, dict):
+        for key, value in env.items():
+            _require(isinstance(key, str) and bool(key), f"{label}.env has invalid key", errors)
+            valid = isinstance(value, str) or (
+                isinstance(value, dict)
+                and isinstance(value.get("from_env"), str)
+                and isinstance(value.get("required", True), bool)
+            )
+            _require(valid, f"{label}.env.{key} must be a string or from_env reference", errors)
+            if isinstance(key, str) and isinstance(value, str) and SENSITIVE_ENV.search(key):
+                _require(False, f"{label}.env.{key} must use from_env; literal secrets are forbidden", errors)
+
+
+def _validate_check(
+    check: object,
+    label: str,
+    errors: list[str],
+    *,
+    cwd: Path | None = None,
+    roots: list[Path] | None = None,
+) -> None:
+    _require(isinstance(check, dict), f"{label} must be an object", errors)
+    if not isinstance(check, dict):
+        return
+    kind = check.get("type")
+    _require(kind in CHECKS, f"{label}.type is unsupported: {kind!r}", errors)
+    if kind in {"file_exists", "dir_exists", "json_field_equals"}:
+        _require(isinstance(check.get("path"), str), f"{label}.path is required", errors)
+        if isinstance(check.get("path"), str) and cwd is not None and roots:
+            _require(_inside(resolve_path(check["path"], cwd), roots),
+                     f"{label}.path escapes authorized_roots", errors)
+    if kind in {"env_set", "command_available"}:
+        _require(isinstance(check.get("name"), str), f"{label}.name is required", errors)
+    if kind == "command_success":
+        _validate_action(check, label, errors)
+        check_cwd = check.get("cwd", ".")
+        _require(isinstance(check_cwd, str), f"{label}.cwd must be a string", errors)
+        if isinstance(check_cwd, str) and cwd is not None and roots:
+            _require(_inside(resolve_path(check_cwd, cwd), roots),
+                     f"{label}.cwd escapes authorized_roots", errors)
+    if kind == "json_field_equals":
+        _require(isinstance(check.get("field"), str), f"{label}.field is required", errors)
+        _require("value" in check, f"{label}.value is required", errors)
+    _require(check.get("timing", "stage") in {"preflight", "stage"},
+             f"{label}.timing must be preflight or stage", errors)
+
+
+def check_source_hashes(contract: dict) -> list[str]:
+    root_value = contract.get("repository", {}).get("root")
+    if not isinstance(root_value, str):
+        return ["repository.root is invalid"]
+    root = Path(root_value).resolve()
+    stale: list[str] = []
+    for index, source in enumerate(contract.get("sources", [])):
+        if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+            continue
+        path = resolve_path(source["path"], root)
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            stale.append(f"sources[{index}] cannot be read: {path}: {exc}")
+            continue
+        if actual != source.get("sha256"):
+            expected_semantic = source.get("semantic_sha256")
+            if source.get("kind") == "tasks" and isinstance(expected_semantic, str):
+                try:
+                    content = path.read_text(encoding="utf-8")
+                    normalized = re.sub(
+                        r"(?m)^(\s*-\s*\[)[ xX](\]\s+T\d+[A-Za-z]?\b)",
+                        r"\1 \2",
+                        content,
+                    )
+                    actual_semantic = hashlib.sha256(normalized.encode()).hexdigest()
+                except (OSError, UnicodeDecodeError):
+                    actual_semantic = ""
+                if actual_semantic == expected_semantic:
+                    continue
+            stale.append(f"sources[{index}] hash changed: {path}")
+    return stale
+
+
+def validate_contract(
+    contract: dict, *, allow_draft: bool = False, check_sources: bool = True
+) -> None:
+    errors: list[str] = []
+    _require(contract.get("schema_version") == SCHEMA_VERSION,
+             f"schema_version must be {SCHEMA_VERSION!r}", errors)
+    identifier = contract.get("id")
+    _require(isinstance(identifier, str) and bool(ID_RE.fullmatch(identifier)),
+             "id must be kebab-case", errors)
+    status = contract.get("status")
+    _require(status in {"draft", "validated"}, "status must be draft or validated", errors)
+    if not allow_draft:
+        _require(status == "validated", "contract status must be validated", errors)
+
+    repository = contract.get("repository")
+    _require(isinstance(repository, dict), "repository must be an object", errors)
+    root_value = repository.get("root") if isinstance(repository, dict) else None
+    _require(isinstance(root_value, str) and Path(root_value).is_absolute(),
+             "repository.root must be absolute", errors)
+    root = Path(root_value).resolve() if isinstance(root_value, str) else Path("/")
+
+    authorized = contract.get("authorized_roots")
+    _require(isinstance(authorized, list) and bool(authorized),
+             "authorized_roots must be a nonempty array", errors)
+    roots: list[Path] = []
+    if isinstance(authorized, list):
+        for index, value in enumerate(authorized):
+            _require(isinstance(value, str) and Path(value).is_absolute(),
+                     f"authorized_roots[{index}] must be absolute", errors)
+            if isinstance(value, str):
+                roots.append(Path(value).resolve())
+
+    sources = contract.get("sources")
+    _require(isinstance(sources, list) and bool(sources), "sources must be a nonempty array", errors)
+    source_paths: set[str] = set()
+    if isinstance(sources, list):
+        for index, source in enumerate(sources):
+            label = f"sources[{index}]"
+            _require(isinstance(source, dict), f"{label} must be an object", errors)
+            if not isinstance(source, dict):
+                continue
+            path = source.get("path")
+            _require(isinstance(path, str) and bool(path), f"{label}.path is required", errors)
+            _require(isinstance(source.get("kind"), str), f"{label}.kind is required", errors)
+            digest = source.get("sha256")
+            _require(isinstance(digest, str) and bool(re.fullmatch(r"[0-9a-f]{64}", digest)),
+                     f"{label}.sha256 must be lowercase SHA-256", errors)
+            semantic = source.get("semantic_sha256")
+            if semantic is not None:
+                _require(isinstance(semantic, str) and bool(re.fullmatch(r"[0-9a-f]{64}", semantic)),
+                         f"{label}.semantic_sha256 must be lowercase SHA-256", errors)
+            if isinstance(path, str):
+                _require(path not in source_paths, f"duplicate source path: {path}", errors)
+                source_paths.add(path)
+                if roots:
+                    _require(_inside(resolve_path(path, root), roots),
+                             f"{label}.path escapes authorized_roots", errors)
+
+    stages = contract.get("stages")
+    _require(isinstance(stages, list), "stages must be an array", errors)
+    if not allow_draft:
+        _require(isinstance(stages, list) and bool(stages), "validated contract needs stages", errors)
+    stage_ids: set[str] = set()
+    ordered_ids: list[str] = []
+    if isinstance(stages, list):
+        for index, stage in enumerate(stages):
+            label = f"stages[{index}]"
+            _require(isinstance(stage, dict), f"{label} must be an object", errors)
+            if not isinstance(stage, dict):
+                continue
+            stage_id = stage.get("id")
+            _require(isinstance(stage_id, str) and bool(ID_RE.fullmatch(stage_id)),
+                     f"{label}.id must be kebab-case", errors)
+            if isinstance(stage_id, str):
+                _require(stage_id not in stage_ids, f"duplicate stage id: {stage_id}", errors)
+                stage_ids.add(stage_id)
+                ordered_ids.append(stage_id)
+            _require(stage.get("kind") in KINDS, f"{label}.kind is invalid", errors)
+            depends = stage.get("depends_on")
+            _require(isinstance(depends, list) and all(isinstance(item, str) for item in depends),
+                     f"{label}.depends_on must be a string array", errors)
+            cwd = stage.get("cwd")
+            _require(isinstance(cwd, str), f"{label}.cwd is required", errors)
+            if isinstance(cwd, str) and roots:
+                _require(_inside(resolve_path(cwd, root), roots),
+                         f"{label}.cwd escapes authorized_roots", errors)
+            stage_cwd = resolve_path(cwd, root) if isinstance(cwd, str) else root
+            _validate_action(stage.get("action"), f"{label}.action", errors)
+            if "resume" in stage:
+                _validate_action(stage.get("resume"), f"{label}.resume", errors)
+            for field in ("preconditions", "postconditions"):
+                checks = stage.get(field)
+                _require(isinstance(checks, list), f"{label}.{field} must be an array", errors)
+                if isinstance(checks, list):
+                    for check_index, check in enumerate(checks):
+                        _validate_check(
+                            check,
+                            f"{label}.{field}[{check_index}]",
+                            errors,
+                            cwd=stage_cwd,
+                            roots=roots,
+                        )
+            _require(bool(stage.get("postconditions")),
+                     f"{label}.postconditions must support resume revalidation", errors)
+            evidence = stage.get("evidence")
+            _require(isinstance(evidence, list), f"{label}.evidence must be an array", errors)
+            if isinstance(evidence, list):
+                for evidence_index, value in enumerate(evidence):
+                    _require(isinstance(value, str),
+                             f"{label}.evidence[{evidence_index}] must be a string", errors)
+                    if isinstance(value, str) and roots:
+                        _require(_inside(resolve_path(value, stage_cwd), roots),
+                                 f"{label}.evidence[{evidence_index}] escapes authorized_roots", errors)
+            recovery = stage.get("recovery", {"max_attempts": 1})
+            _require(isinstance(recovery, dict), f"{label}.recovery must be an object", errors)
+            if isinstance(recovery, dict):
+                attempts = recovery.get("max_attempts", 1)
+                _require(isinstance(attempts, int) and attempts >= 1,
+                         f"{label}.recovery.max_attempts must be positive", errors)
+                if isinstance(attempts, int) and attempts > 1:
+                    codes = recovery.get("retry_exit_codes")
+                    _require(isinstance(codes, list) and bool(codes)
+                             and all(isinstance(code, int) for code in codes),
+                             f"{label}.recovery needs retry_exit_codes", errors)
+                    if stage.get("kind") == "wiggum" and isinstance(codes, list) and 4 in codes:
+                        _require(isinstance(recovery.get("reason"), dict),
+                                 f"{label}.recovery needs a reason constraint for Wiggum exit 4", errors)
+                    backoff = recovery.get("backoff_seconds", [])
+                    _require(isinstance(backoff, list) and all(
+                        isinstance(delay, (int, float)) and delay >= 0 for delay in backoff
+                    ), f"{label}.recovery.backoff_seconds must be nonnegative numbers", errors)
+                    total = recovery.get("total_timeout_seconds")
+                    _require(total is None or (isinstance(total, (int, float)) and total > 0),
+                             f"{label}.recovery.total_timeout_seconds must be positive", errors)
+                    reason = recovery.get("reason")
+                    if isinstance(reason, dict):
+                        _require(isinstance(reason.get("jsonl"), str),
+                                 f"{label}.recovery.reason.jsonl is required", errors)
+                        _require(isinstance(reason.get("field", "reason"), str),
+                                 f"{label}.recovery.reason.field must be a string", errors)
+                        _require(isinstance(reason.get("allowed"), list) and bool(reason.get("allowed"))
+                                 and all(isinstance(item, str) for item in reason.get("allowed", [])),
+                                 f"{label}.recovery.reason.allowed must be a nonempty string array", errors)
+                        if isinstance(reason.get("jsonl"), str) and roots:
+                            _require(_inside(resolve_path(reason["jsonl"], stage_cwd), roots),
+                                     f"{label}.recovery.reason.jsonl escapes authorized_roots", errors)
+
+    if isinstance(stages, list):
+        positions = {stage_id: index for index, stage_id in enumerate(ordered_ids)}
+        for index, stage in enumerate(stages):
+            if not isinstance(stage, dict) or not isinstance(stage.get("depends_on"), list):
+                continue
+            for dependency in stage["depends_on"]:
+                _require(dependency in stage_ids, f"stages[{index}] unknown dependency: {dependency}", errors)
+                if dependency in positions:
+                    _require(positions[dependency] < index,
+                             f"stages[{index}] dependency must appear earlier: {dependency}", errors)
+
+    coverage = contract.get("coverage")
+    _require(isinstance(coverage, list), "coverage must be an array", errors)
+    coverage_ids: set[str] = set()
+    if isinstance(coverage, list):
+        for index, entry in enumerate(coverage):
+            label = f"coverage[{index}]"
+            _require(isinstance(entry, dict), f"{label} must be an object", errors)
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            _require(isinstance(entry_id, str) and bool(entry_id), f"{label}.id is required", errors)
+            if isinstance(entry_id, str):
+                _require(entry_id not in coverage_ids, f"duplicate coverage id: {entry_id}", errors)
+                coverage_ids.add(entry_id)
+            _require(entry.get("disposition") in DISPOSITIONS,
+                     f"{label}.disposition is invalid", errors)
+            if not allow_draft:
+                _require(entry.get("disposition") not in {"unresolved", "unsupported"},
+                         f"{label} remains {entry.get('disposition')}", errors)
+            source = entry.get("source")
+            _require(isinstance(source, dict) and isinstance(source.get("path"), str)
+                     and isinstance(source.get("line"), int) and source.get("line", 0) > 0
+                     and isinstance(source.get("anchor"), str),
+                     f"{label}.source needs path, line, and anchor", errors)
+            if isinstance(source, dict) and isinstance(source.get("path"), str):
+                _require(source["path"] in source_paths,
+                         f"{label}.source.path is not in sources: {source['path']}", errors)
+            mappings = entry.get("stage_ids")
+            _require(isinstance(mappings, list), f"{label}.stage_ids must be an array", errors)
+            if isinstance(mappings, list):
+                for stage_id in mappings:
+                    _require(stage_id in stage_ids, f"{label} maps unknown stage: {stage_id}", errors)
+            _require(isinstance(entry.get("verification_ids"), list),
+                     f"{label}.verification_ids must be an array", errors)
+            _require(isinstance(entry.get("rationale"), str) and bool(entry.get("rationale")),
+                     f"{label}.rationale is required", errors)
+            _require(isinstance(entry.get("evidence"), list), f"{label}.evidence must be an array", errors)
+
+    findings = contract.get("findings")
+    _require(isinstance(findings, list), "findings must be an array", errors)
+    if isinstance(findings, list):
+        finding_ids: set[str] = set()
+        for index, finding in enumerate(findings):
+            label = f"findings[{index}]"
+            _require(isinstance(finding, dict), f"{label} must be an object", errors)
+            if not isinstance(finding, dict):
+                continue
+            finding_id = finding.get("id")
+            _require(isinstance(finding_id, str) and bool(finding_id), f"{label}.id is required", errors)
+            if isinstance(finding_id, str):
+                _require(finding_id not in finding_ids, f"duplicate finding id: {finding_id}", errors)
+                finding_ids.add(finding_id)
+            _require(finding.get("severity") in {"info", "warning", "blocker"},
+                     f"{label}.severity is invalid", errors)
+            _require(finding.get("status") in {"open", "resolved", "accepted"},
+                     f"{label}.status is invalid", errors)
+            _require(isinstance(finding.get("message"), str) and bool(finding.get("message")),
+                     f"{label}.message is required", errors)
+            _require(isinstance(finding.get("resolution"), str), f"{label}.resolution is required", errors)
+            if not allow_draft and finding.get("severity") == "blocker" and finding.get("status") == "open":
+                errors.append(f"{label} is an open blocker: {finding.get('message', '')}")
+
+    if errors:
+        raise ContractError("\n".join(errors))
+    if check_sources:
+        stale = check_source_hashes(contract)
+        if stale:
+            raise StaleSourceError("\n".join(stale))
+
+
+def canonical_bytes(contract: dict) -> bytes:
+    return (json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()

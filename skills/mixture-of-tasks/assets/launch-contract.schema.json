@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/mixture-of-tasks/launch-contract-1.0.schema.json",
+  "title": "Mixture of Tasks launch contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "status",
+    "repository",
+    "authorized_roots",
+    "sources",
+    "coverage",
+    "findings",
+    "stages"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "status": {"enum": ["draft", "validated"]},
+    "generated_by": {"type": "object"},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root"],
+      "properties": {
+        "root": {"type": "string"},
+        "revision": {"type": ["string", "null"]},
+        "dirty": {"type": ["boolean", "null"]}
+      }
+    },
+    "authorized_roots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "features": {"type": "array", "items": {"type": "object"}},
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "sha256"],
+        "properties": {
+          "path": {"type": "string"},
+          "kind": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "semantic_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "lines": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "inventory": {"type": "object"},
+    "configuration": {"type": "object"},
+    "coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id", "source", "kind", "timing", "producer", "disposition",
+          "stage_ids", "verification_ids", "rationale", "evidence"
+        ],
+        "properties": {
+          "id": {"type": "string"},
+          "source": {
+            "type": "object",
+            "required": ["path", "line", "anchor"],
+            "properties": {
+              "path": {"type": "string"},
+              "line": {"type": "integer", "minimum": 1},
+              "anchor": {"type": "string"}
+            }
+          },
+          "kind": {"enum": ["implementation", "prerequisite", "verification", "decision", "operation"]},
+          "timing": {"type": "string"},
+          "producer": {"type": "string"},
+          "disposition": {"enum": ["mapped", "optional", "out-of-scope", "unresolved", "unsupported"]},
+          "stage_ids": {"type": "array", "items": {"type": "string"}},
+          "verification_ids": {"type": "array", "items": {"type": "string"}},
+          "rationale": {"type": "string"},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "status", "message", "source", "resolution"],
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"enum": ["info", "warning", "blocker"]},
+          "status": {"enum": ["open", "resolved", "accepted"]},
+          "message": {"type": "string"},
+          "source": {"type": "object"},
+          "resolution": {"type": "string"}
+        }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "depends_on", "cwd", "preconditions", "postconditions", "evidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "kind": {"enum": ["setup", "decision", "command", "wiggum", "smoke"]},
+          "depends_on": {"type": "array", "items": {"type": "string"}},
+          "cwd": {"type": "string"},
+          "action": {"$ref": "#/$defs/action"},
+          "resume": {"$ref": "#/$defs/action"},
+          "preconditions": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+          "postconditions": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+          "recovery": {"type": "object"},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": ["argv"],
+      "properties": {
+        "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "env": {"type": "object"},
+        "timeout_seconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "check": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["file_exists", "dir_exists", "env_set", "command_available", "command_success", "json_field_equals"]},
+        "timing": {"enum": ["preflight", "stage"]}
+      }
+    }
+  }
+}
