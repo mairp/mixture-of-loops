@@ -22,7 +22,17 @@ import tempfile
 import time
 from typing import Any
 
-from contract_lib import ContractError, StaleSourceError, load_contract, resolve_path, validate_contract
+from contract_lib import (
+    CURRENT_KIND,
+    LEGACY_STATE_DIRNAME,
+    STATE_DIRNAME,
+    ContractError,
+    StaleSourceError,
+    load_contract,
+    resolve_path,
+    state_dirname,
+    validate_contract,
+)
 
 
 E_INVALID = 20
@@ -129,7 +139,13 @@ def redacted_action(action: dict) -> str:
 
 def path_for(value: str, cwd: Path) -> Path:
     path = Path(value)
-    return path.resolve() if path.is_absolute() else (cwd / path).resolve()
+    if path.is_absolute():
+        return path.resolve()
+    # A path into Specstride's state dir (either spelling) follows the same rule as
+    # Specstride itself: .specstride/, unless the workdir only has the legacy dir.
+    if path.parts and path.parts[0] in (STATE_DIRNAME, LEGACY_STATE_DIRNAME):
+        path = Path(state_dirname(cwd), *path.parts[1:])
+    return (cwd / path).resolve()
 
 
 def dotted_value(value: object, field: str) -> object:
@@ -291,11 +307,12 @@ def display_action(action: dict, kind: str, color: bool) -> dict:
     effective["env"] = dict(action.get("env", {}))
     if not color:
         effective["env"].setdefault("NO_COLOR", "1")
-        if kind == "wiggum":
+        if kind == CURRENT_KIND:
             effective["argv"] = [item for item in effective["argv"] if item != "--live"]
             if "--no-live" not in effective["argv"]:
                 effective["argv"].append("--no-live")
-            effective["env"]["WIGGUM_LIVE"] = "false"
+            effective["env"]["SPECSTRIDE_LIVE"] = "false"
+            effective["env"]["WIGGUM_LIVE"] = "false"   # older checkouts (formerly Wiggum)
     return effective
 
 
@@ -305,8 +322,8 @@ def run_action(action: dict, cwd: Path, kind: str, reporter: Reporter) -> tuple[
     slave: int | None = None
     try:
         environment = resolve_env(action.get("env"))
-        use_pty = kind == "wiggum" and reporter.color and not sys.stdout.isatty()
-        capture_plain = kind == "wiggum" and not reporter.color
+        use_pty = kind == CURRENT_KIND and reporter.color and not sys.stdout.isatty()
+        capture_plain = kind == CURRENT_KIND and not reporter.color
         stdout: object = None
         stderr: object = None
         if use_pty:
@@ -511,7 +528,8 @@ def main() -> int:
     color = effective_color(args.color, args.no_color)
     try:
         contract = load_contract(args.contract)
-        validate_contract(contract, allow_draft=False, check_sources=True)
+        for warning in validate_contract(contract, allow_draft=False, check_sources=True):
+            print(f"[WARN] {warning}", file=sys.stderr)
     except StaleSourceError as exc:
         print(f"[STALE] {exc}", file=sys.stderr)
         print("[DIGEST] state=failed exit=23 last-stage=none evidence=none", file=sys.stderr)

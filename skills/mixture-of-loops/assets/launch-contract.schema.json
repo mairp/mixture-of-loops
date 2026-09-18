@@ -106,7 +106,7 @@
         "required": ["id", "kind", "depends_on", "cwd", "preconditions", "postconditions", "evidence"],
         "properties": {
           "id": {"type": "string"},
-          "kind": {"enum": ["setup", "decision", "command", "wiggum", "smoke"]},
+          "kind": {"enum": ["setup", "decision", "command", "specstride", "wiggum", "smoke"], "$comment": "\"wiggum\" is the deprecated pre-rename alias of \"specstride\" (Specstride was formerly Wiggum); validators accept it with a warning and normalize it to \"specstride\"."},
           "depends_on": {"type": "array", "items": {"type": "string"}},
           "cwd": {"type": "string"},
           "action": {"$ref": "#/$defs/action"},

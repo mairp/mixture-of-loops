@@ -1,6 +1,6 @@
 ---
 name: mixture-of-loops
-description: Derive a complete, unattended Wiggum pipeline from one or more Spec Kit feature sets. Use when asked to turn spec.md, plan.md, tasks.md, verification declarations, dependencies, prerequisites, or release gates into a provenance-bound launch contract and executable run script.
+description: Derive a complete, unattended Specstride pipeline from one or more Spec Kit feature sets. Use when asked to turn spec.md, plan.md, tasks.md, verification declarations, dependencies, prerequisites, or release gates into a provenance-bound launch contract and executable run script.
 ---
 
 # Mixture of Loops
@@ -45,7 +45,7 @@ asks to run it.
    classification, command-to-phase reconciliation, dependencies, and policy timing.
 4. Preserve declared verification commands as fixed `executable` plus `args`; never
    invent a plausible command. An absent or conflicting declaration is an explicit
-   finding. Keep Wiggum's verification plan separate from the launch contract and pass it
+   finding. Keep Specstride's verification plan separate from the launch contract and pass it
    with `--verification-commands`.
 5. Classify prerequisites by producer and earliest valid check. A future stage output is
    not a preflight input. Existing authorization may be consumed within its scope;
@@ -74,14 +74,14 @@ asks to run it.
 - Default execution uses existing prerequisites. `--implement` may perform only declared,
   idempotent setup actions and must verify their postconditions. `--smoke` adds declared
   smoke stages. `--dry-run` creates no state, logs, directories, or subprocesses.
-- Use bounded timeouts and recovery. Retry only classified transient outcomes. A Wiggum
+- Use bounded timeouts and recovery. Retry only classified transient outcomes. A Specstride
   exit code alone is insufficient when it covers several stop reasons; bind recovery to
   the current structured `run_stop.reason`. Preserve intentional stops.
 - Revalidate completed-stage postconditions on launcher resume. Refuse changed source
   hashes, a live competing run, dependency cycles, or open blockers.
 - Keep terminal labels meaningful without color. Honor `--color=auto|always|never`,
-  `--no-color`, and `NO_COLOR`. Let Wiggum own its single live presenter; use `--live`,
-  `WIGGUM_AGENT_STREAM=true`, and `WIGGUM_LIVE_DETAIL=full` only where supported. Durable
+  `--no-color`, and `NO_COLOR`. Let Specstride own its single live presenter; use `--live`,
+  `SPECSTRIDE_AGENT_STREAM=true`, and `SPECSTRIDE_LIVE_DETAIL=full` only where supported. Durable
   launcher logs and JSON remain free of ANSI escapes.
 - Configure Loki (`--telemetry`/`--loki-url`) and OTLP
   (`--otel`/`--otel-url`) independently. Report observed delivery state without
@@ -89,6 +89,6 @@ asks to run it.
 - Print a final digest on completion, failure, stop, and interruption with the last stage,
   child result, evidence/state paths, and next automated or operator action.
 
-The generated launcher is a control layer around Wiggum, not a second gate authority.
-Wiggum remains responsible for proposer/critic separation, phase gates, evidence, and its
+The generated launcher is a control layer around Specstride, not a second gate authority.
+Specstride remains responsible for proposer/critic separation, phase gates, evidence, and its
 feature state.

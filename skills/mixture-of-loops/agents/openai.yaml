@@ -1,6 +1,6 @@
 interface:
   display_name: "Mixture of Loops"
-  short_description: "Build autonomous Wiggum pipelines from Spec Kit"
-  default_prompt: "Use $mixture-of-loops to derive an autonomous Wiggum pipeline from this repository’s Spec Kit specifications."
+  short_description: "Build autonomous Specstride pipelines from Spec Kit"
+  default_prompt: "Use $mixture-of-loops to derive an autonomous Specstride pipeline from this repository’s Spec Kit specifications."
 policy:
   allow_implicit_invocation: true

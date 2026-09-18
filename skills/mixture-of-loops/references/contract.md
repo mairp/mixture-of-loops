@@ -1,7 +1,7 @@
 # Launch contract and runtime
 
-The launch contract is pipeline data. It does not replace Wiggum's verification plan or
-`.wiggum` state. Schema version `1.0` is defined in
+The launch contract is pipeline data. It does not replace Specstride's verification plan or
+`.specstride` state. Schema version `1.0` is defined in
 `assets/launch-contract.schema.json` and enforced more strictly by
 `scripts/validate_contract.py`.
 
@@ -23,46 +23,57 @@ blockers. `bootstrap_contract.py` intentionally creates a draft with unresolved 
 
 ## Stages
 
-Stage `kind` is one of `setup`, `decision`, `command`, `wiggum`, or `smoke`.
+Stage `kind` is one of `setup`, `decision`, `command`, `specstride`, or `smoke`.
+
+Specstride was formerly Wiggum. Contracts written before the rename still validate:
+the stage kind `wiggum` is a deprecated alias that validation normalizes in memory to
+`specstride` and reports as a warning, never an error. The same normalization points a
+legacy `wiggum` command (argv or `command_available` check) at `specstride`, renames
+`WIGGUM_*` action env keys to `SPECSTRIDE_*`, reads `configuration.wiggum_live` as
+`specstride_live`, and reads coverage timing `wiggum-phase:N` as `specstride-phase:N`.
+Paths under a workdir's `.specstride/` or legacy `.wiggum/` state dir resolve the way
+Specstride resolves them: `.specstride/`, unless only the legacy dir exists. For a
+`specstride` stage in `never` color mode the runtime sets both `SPECSTRIDE_LIVE=false`
+and `WIGGUM_LIVE=false`, so older checkouts behave the same.
 
 ```json
 {
   "id": "run-feature",
-  "kind": "wiggum",
+  "kind": "specstride",
   "depends_on": ["prepare-verification"],
   "cwd": ".",
   "action": {
-    "argv": ["wiggum", "run", "-w", ".", "-s", "specs/007/tasks.md",
+    "argv": ["specstride", "run", "-w", ".", "-s", "specs/007/tasks.md",
       "--spec-format", "speckit-tasks", "--feature", "007", "--live"],
     "env": {
-      "WIGGUM_AGENT_STREAM": "true",
-      "WIGGUM_LIVE_DETAIL": "full",
+      "SPECSTRIDE_AGENT_STREAM": "true",
+      "SPECSTRIDE_LIVE_DETAIL": "full",
       "TOKEN": {"from_env": "FEATURE_TOKEN", "required": true}
     },
     "timeout_seconds": 14400
   },
   "resume": {
-    "argv": ["wiggum", "resume", "-w", ".", "--feature", "007"],
+    "argv": ["specstride", "resume", "-w", ".", "--feature", "007"],
     "timeout_seconds": 14400
   },
   "preconditions": [
-    {"type": "command_available", "name": "wiggum", "timing": "preflight"}
+    {"type": "command_available", "name": "specstride", "timing": "preflight"}
   ],
   "postconditions": [
-    {"type": "file_exists", "path": ".wiggum/features/007/PROGRESS.md"}
+    {"type": "file_exists", "path": ".specstride/features/007/PROGRESS.md"}
   ],
   "recovery": {
     "max_attempts": 2,
     "backoff_seconds": [5],
     "retry_exit_codes": [4],
     "reason": {
-      "jsonl": ".wiggum/features/007/events.jsonl",
+      "jsonl": ".specstride/features/007/events.jsonl",
       "event": "run_stop",
       "field": "reason",
       "allowed": ["wall_budget"]
     }
   },
-  "evidence": [".wiggum/features/007"]
+  "evidence": [".specstride/features/007"]
 }
 ```
 
@@ -83,7 +94,7 @@ owning stage boundary. A setup stage without `--implement` runs no action and mu
 satisfy its postconditions. Smoke stages run only with `--smoke`.
 
 Recovery defaults to one attempt. More attempts require explicit retry exit codes. For
-ambiguous Wiggum outcomes, include a correlated JSONL reason constraint. A retry uses
+ambiguous Specstride outcomes, include a correlated JSONL reason constraint. A retry uses
 `resume` after the first action when supplied.
 
 ## Generated bundle
@@ -105,11 +116,11 @@ checkbox progress is normalized, while a changed requirement, stage, policy, or 
 binding starts a fresh stage record.
 
 Color precedence is `--no-color`, an explicit `--color`, a present `NO_COLOR`, then
-automatic TTY detection. In `always` mode with redirected output, the runtime gives a Wiggum stage a
-pseudo-terminal so Wiggum's own `--live` presenter remains the sole colored presenter. In
-`never` mode it replaces `--live` with Wiggum's supported `--no-live`, supplies a non-TTY
+automatic TTY detection. In `always` mode with redirected output, the runtime gives a Specstride stage a
+pseudo-terminal so Specstride's own `--live` presenter remains the sole colored presenter. In
+`never` mode it replaces `--live` with Specstride's supported `--no-live`, supplies a non-TTY
 pipe, forwards the plain stream, and strips ANSI from the launcher log. Other modes inherit
-the terminal directly; Wiggum continues to own its raw `run.log` and event stream.
+the terminal directly; Specstride continues to own its raw `run.log` and event stream.
 
 Launcher exit codes are `0` success/dry-run, `20` invalid contract, `21` preflight blocker,
 `22` stage failure or exhausted recovery, `23` stale source, and `24` pipeline lock held.

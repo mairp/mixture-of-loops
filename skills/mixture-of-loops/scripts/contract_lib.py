@@ -12,7 +12,20 @@ import re
 
 SCHEMA_VERSION = "1.0"
 ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-KINDS = {"setup", "decision", "command", "wiggum", "smoke"}
+KINDS = {"setup", "decision", "command", "specstride", "smoke"}
+# Specstride was formerly Wiggum. Contracts written before the rename still load:
+# each legacy spelling is normalized in memory to the current one and reported as
+# a warning, never an error (see normalize_contract).
+LEGACY_KIND = "wiggum"
+CURRENT_KIND = "specstride"
+LEGACY_COMMAND = "wiggum"
+LEGACY_ENV_PREFIX = "WIGGUM_"
+LEGACY_TIMING_PREFIX = "wiggum-phase:"
+LEGACY_LIVE_KEY = "wiggum_live"
+# Specstride's per-workdir state directory, and the legacy one a workdir that
+# predates the rename keeps using in place.
+STATE_DIRNAME = ".specstride"
+LEGACY_STATE_DIRNAME = ".wiggum"
 CHECKS = {
     "file_exists",
     "dir_exists",
@@ -163,9 +176,92 @@ def check_source_hashes(contract: dict) -> list[str]:
     return stale
 
 
+def state_dirname(cwd: Path) -> str:
+    """The Specstride state-dir name under `cwd`: the legacy one only when it is the
+    only one present (Specstride never moves it)."""
+    if not (cwd / STATE_DIRNAME).is_dir() and (cwd / LEGACY_STATE_DIRNAME).is_dir():
+        return LEGACY_STATE_DIRNAME
+    return STATE_DIRNAME
+
+
+def _normalize_action(action: object) -> bool:
+    """Point a legacy command at `specstride` and legacy env names at SPECSTRIDE_*."""
+    changed = False
+    if not isinstance(action, dict):
+        return changed
+    argv = action.get("argv")
+    if isinstance(argv, list) and argv and isinstance(argv[0], str):
+        head = Path(argv[0])
+        if head.name == LEGACY_COMMAND:
+            argv[0] = str(head.with_name(CURRENT_KIND)) if str(head.parent) != "." else CURRENT_KIND
+            changed = True
+    env = action.get("env")
+    if isinstance(env, dict):
+        for key in [k for k in env if isinstance(k, str) and k.startswith(LEGACY_ENV_PREFIX)]:
+            new = "SPECSTRIDE_" + key[len(LEGACY_ENV_PREFIX):]
+            if new not in env:
+                env[new] = env.pop(key)
+                changed = True
+    return changed
+
+
+def normalize_contract(contract: dict) -> list[str]:
+    """Rewrite pre-rename spellings in place; return one warning per rewrite site.
+
+    Stage kind "wiggum" becomes "specstride"; in any stage a `wiggum` command
+    (argv or command_available check) becomes `specstride` and WIGGUM_* action
+    env keys become SPECSTRIDE_*; configuration.wiggum_live becomes
+    specstride_live; coverage timing "wiggum-phase:N" becomes "specstride-phase:N"."""
+    warnings: list[str] = []
+    stages = contract.get("stages")
+    if isinstance(stages, list):
+        for index, stage in enumerate(stages):
+            if not isinstance(stage, dict):
+                continue
+            if stage.get("kind") == LEGACY_KIND:
+                stage["kind"] = CURRENT_KIND
+                warnings.append(f"stages[{index}].kind {LEGACY_KIND!r} is deprecated; "
+                                f"read as {CURRENT_KIND!r} (Specstride was formerly Wiggum)")
+            rewrote = False
+            for field in ("action", "resume"):
+                rewrote = _normalize_action(stage.get(field)) or rewrote
+            for field in ("preconditions", "postconditions"):
+                for check in stage.get(field) or []:
+                    if not isinstance(check, dict):
+                        continue
+                    if check.get("type") == "command_available" and check.get("name") == LEGACY_COMMAND:
+                        check["name"] = CURRENT_KIND
+                        rewrote = True
+                    elif check.get("type") == "command_success":
+                        rewrote = _normalize_action(check) or rewrote
+            if rewrote:
+                warnings.append(f"stages[{index}] uses the deprecated {LEGACY_COMMAND!r} command "
+                                f"or {LEGACY_ENV_PREFIX}* env names; read as {CURRENT_KIND!r}")
+    configuration = contract.get("configuration")
+    if isinstance(configuration, dict) and LEGACY_LIVE_KEY in configuration:
+        value = configuration.pop(LEGACY_LIVE_KEY)
+        configuration.setdefault("specstride_live", value)
+        warnings.append(f"configuration.{LEGACY_LIVE_KEY} is deprecated; read as specstride_live")
+    coverage = contract.get("coverage")
+    renamed_timing = 0
+    if isinstance(coverage, list):
+        for entry in coverage:
+            timing = entry.get("timing") if isinstance(entry, dict) else None
+            if isinstance(timing, str) and timing.startswith(LEGACY_TIMING_PREFIX):
+                entry["timing"] = "specstride-phase:" + timing[len(LEGACY_TIMING_PREFIX):]
+                renamed_timing += 1
+    if renamed_timing:
+        warnings.append(f"{renamed_timing} coverage timing value(s) use the deprecated "
+                        f"{LEGACY_TIMING_PREFIX!r} prefix; read as 'specstride-phase:'")
+    return warnings
+
+
 def validate_contract(
     contract: dict, *, allow_draft: bool = False, check_sources: bool = True
-) -> None:
+) -> list[str]:
+    """Normalize legacy spellings in place, validate, and return the warnings.
+    Raises ContractError (or StaleSourceError) on any error."""
+    warnings = normalize_contract(contract)
     errors: list[str] = []
     _require(contract.get("schema_version") == SCHEMA_VERSION,
              f"schema_version must be {SCHEMA_VERSION!r}", errors)
@@ -287,9 +383,9 @@ def validate_contract(
                     _require(isinstance(codes, list) and bool(codes)
                              and all(isinstance(code, int) for code in codes),
                              f"{label}.recovery needs retry_exit_codes", errors)
-                    if stage.get("kind") == "wiggum" and isinstance(codes, list) and 4 in codes:
+                    if stage.get("kind") == CURRENT_KIND and isinstance(codes, list) and 4 in codes:
                         _require(isinstance(recovery.get("reason"), dict),
-                                 f"{label}.recovery needs a reason constraint for Wiggum exit 4", errors)
+                                 f"{label}.recovery needs a reason constraint for Specstride exit 4", errors)
                     backoff = recovery.get("backoff_seconds", [])
                     _require(isinstance(backoff, list) and all(
                         isinstance(delay, (int, float)) and delay >= 0 for delay in backoff
@@ -389,6 +485,7 @@ def validate_contract(
         stale = check_source_hashes(contract)
         if stale:
             raise StaleSourceError("\n".join(stale))
+    return warnings
 
 
 def canonical_bytes(contract: dict) -> bytes:

@@ -53,19 +53,19 @@ that gate.
 For each command, reconcile:
 
 ```text
-source phase/task -> command ID -> Wiggum task phase -> phase/release gate
+source phase/task -> command ID -> Specstride task phase -> phase/release gate
 ```
 
 Count source declarations, normalized commands, and gate mappings to expose omissions,
 collisions, and unintended duplicates. Phases with no declared commands stay explicitly
-empty; Wiggum's discovered project tests are supplemental and must not be described as the
+empty; Specstride's discovered project tests are supplemental and must not be described as the
 declared gate.
 
-The installed Wiggum interface checked on 2026-09-09 accepts a JSON document containing
+The installed Specstride interface checked on 2026-09-09 accepts a JSON document containing
 `commands[]` with `id`, `phase`, `executable`, `args`, `cwd`, `timeoutSec`, and optional
 `env`. It resolves bare executables, rejects missing cwd or unknown phases, and binds the
-document hash into its verification plan. Recheck `wiggum run --help` when targeting a
-different installation. This evidence came from `/root/wiggum` at revision
+document hash into its verification plan. Recheck `specstride run --help` when targeting a
+different installation. This evidence came from the local Specstride checkout (then still named Wiggum) at revision
 `1e3777f3fe16d0bc6d9e0568b4b59e519e4bab9f` with verification-related working-tree
 changes, so it establishes local compatibility rather than a released-version guarantee.
 
@@ -76,22 +76,22 @@ evidence paths, and bounded recovery. Put a prerequisite at the earliest boundar
 is both needed and expected to exist. Setup stages run only with `--implement`; otherwise
 their postconditions must already hold.
 
-Build a Wiggum action using only options supported by the target installation. Current
+Build a Specstride action using only options supported by the target installation. Current
 local support includes `--spec-format speckit-tasks`, `--feature`, `--proposer`, `--critic`,
 `--verification required`, `--verification-commands`, `--test-plan`, `--generate-tests`,
 `--telemetry`, `--loki-url`, `--otel`, `--otel-url`, `--live`, `--no-live`, and timeout/
-budget controls. `wiggum resume` restores saved configuration, but persist explicit
+budget controls. `specstride resume` restores saved configuration, but persist explicit
 overrides in the resume argv rather than assuming every environment setting was saved.
 
-Wiggum exit `4` covers wall budget, iteration exhaustion, and consecutive proposer errors.
+Specstride exit `4` covers wall budget, iteration exhaustion, and consecutive proposer errors.
 Only retry it when the newest correlated event records an allowed `run_stop.reason`. Exit
 `6` is an intentional stop and must remain stopped. Exit `5` means another run owns the
 workdir and is a terminal launcher conflict.
 
-Enable the single Wiggum presenter by inheriting the terminal. Do not pipe its output
-through a blanket `tee`; Wiggum chooses live mode using TTY detection and already stores
+Enable the single Specstride presenter by inheriting the terminal. Do not pipe its output
+through a blanket `tee`; Specstride chooses live mode using TTY detection and already stores
 raw output in its own `run.log`. In detached execution, use the durable event stream and
-attach with `wiggum watch`, `wiggum events -f`, or `wiggum tail` for the selected workdir
+attach with `specstride watch`, `specstride events -f`, or `specstride tail` for the selected workdir
 and feature.
 
 ## Readiness review

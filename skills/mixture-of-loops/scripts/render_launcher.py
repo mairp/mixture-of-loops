@@ -112,7 +112,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         contract = load_contract(args.contract)
-        validate_contract(contract, allow_draft=False, check_sources=True)
+        # Normalizes legacy spellings in place, so the bundle carries the current ones.
+        for warning in validate_contract(contract, allow_draft=False, check_sources=True):
+            print(f"warning: {warning}", file=sys.stderr)
         output = Path(args.output).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists() and not existing_launcher_is_intact(output) and not args.replace_edited:

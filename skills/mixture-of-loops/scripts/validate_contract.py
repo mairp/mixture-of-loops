@@ -17,7 +17,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         contract = load_contract(args.contract)
-        validate_contract(
+        warnings = validate_contract(
             contract,
             allow_draft=args.allow_draft,
             check_sources=not args.no_source_check,
@@ -28,6 +28,8 @@ def main() -> int:
     except ContractError as exc:
         print(f"invalid launch contract:\n{exc}", file=sys.stderr)
         return 20
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
     state = contract.get("status", "unknown")
     print(f"valid {state} launch contract: {contract.get('id')}")
     return 0

@@ -214,7 +214,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
                 },
                 {
                     "id": "recover-run",
-                    "kind": "wiggum",
+                    "kind": "specstride",
                     "depends_on": ["prepare"],
                     "cwd": ".",
                     "action": {"argv": [str(worker)], "timeout_seconds": 10},
@@ -265,7 +265,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
             self.assertTrue((repository / "recovered").is_file())
             self.assertIn("[RECOVER]", recovered.stdout)
 
-    def test_wiggum_color_modes_preserve_or_disable_tty_view(self) -> None:
+    def test_specstride_color_modes_preserve_or_disable_tty_view(self) -> None:
         for mode, expected_tty, expected_flag in (
             ("never", False, "--no-live"),
             ("always", True, "--live"),
@@ -274,19 +274,19 @@ class MixtureOfLoopsTests(unittest.TestCase):
                 repository = Path(temporary)
                 source = repository / "spec.md"
                 source.write_text("fixture\n", encoding="utf-8")
-                worker = repository / "fake-wiggum"
+                worker = repository / "fake-specstride"
                 worker.write_text(
                     "#!/usr/bin/env python3\n"
                     "import json, os, sys\n"
                     "from pathlib import Path\n"
                     "Path('display.json').write_text(json.dumps({'isatty': os.isatty(1), 'args': sys.argv[1:]}))\n"
-                    "print('fake wiggum output')\n",
+                    "print('fake specstride output')\n",
                     encoding="utf-8",
                 )
                 worker.chmod(0o755)
                 stage = {
-                    "id": "wiggum-run",
-                    "kind": "wiggum",
+                    "id": "specstride-run",
+                    "kind": "specstride",
                     "depends_on": [],
                     "cwd": ".",
                     "action": {"argv": [str(worker), "--live"], "timeout_seconds": 10},
@@ -365,6 +365,194 @@ class MixtureOfLoopsTests(unittest.TestCase):
             self.assertIn("shell command string", result.stdout)
             self.assertIn("literal secrets", result.stdout)
             self.assertIn("escapes authorized_roots", result.stdout)
+
+
+    # ── Specstride was formerly Wiggum: the legacy stage kind is an alias ───────
+    FAKE_SPECSTRIDE = (
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "state = Path('.specstride/features/007')\n"
+        "state.mkdir(parents=True, exist_ok=True)\n"
+        "(state / 'PROGRESS.md').write_text('done\\n')\n"
+        "Path('invocation.json').write_text(json.dumps({\n"
+        "    'argv0': Path(sys.argv[0]).name, 'args': sys.argv[1:],\n"
+        "    'env': {k: v for k, v in os.environ.items()\n"
+        "            if k.startswith(('SPECSTRIDE_', 'WIGGUM_'))}}))\n"
+    )
+
+    def _alias_fixture(self, repository: Path, kind: str) -> tuple[Path, dict[str, str]]:
+        source = repository / "spec.md"
+        source.write_text("fixture\n", encoding="utf-8")
+        bin_dir = repository / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "specstride"
+        fake.write_text(self.FAKE_SPECSTRIDE, encoding="utf-8")
+        fake.chmod(0o755)
+        legacy = kind == "wiggum"
+        state = ".wiggum" if legacy else ".specstride"
+        command = "wiggum" if legacy else "specstride"
+        prefix = "WIGGUM_" if legacy else "SPECSTRIDE_"
+        stage = {
+            "id": "run-feature",
+            "kind": kind,
+            "depends_on": [],
+            "cwd": ".",
+            "action": {
+                "argv": [command, "run", "-w", ".", "-s", "spec.md", "--feature", "007"],
+                "env": {prefix + "AGENT_STREAM": "true", prefix + "LIVE_DETAIL": "full"},
+                "timeout_seconds": 30,
+            },
+            "preconditions": [{"type": "command_available", "name": command, "timing": "preflight"}],
+            "postconditions": [{"type": "file_exists", "path": f"{state}/features/007/PROGRESS.md"}],
+            "evidence": [f"{state}/features/007"],
+        }
+        value = base_contract(repository, source, [stage])
+        value["configuration"] = {("wiggum_live" if legacy else "specstride_live"): True}
+        value["coverage"][0]["timing"] = ("wiggum" if legacy else "specstride") + "-phase:1"
+        contract = repository / "launch-contract.json"
+        contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        environment = dict(os.environ)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PATH"] = f"{bin_dir}:{environment.get('PATH', '/usr/bin:/bin')}"
+        return contract, environment
+
+    def _run_env(self, environment: dict[str, str], *args: object, cwd: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(item) for item in args], cwd=cwd, env=environment, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+    def test_legacy_wiggum_kind_validates_with_a_warning_and_launches_specstride(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            contract, environment = self._alias_fixture(repository, "wiggum")
+
+            validated = self._run_env(environment, sys.executable, SCRIPTS / "validate_contract.py",
+                                      contract, cwd=repository)
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            self.assertIn("valid validated launch contract", validated.stdout)
+            self.assertIn("warning: stages[0].kind 'wiggum' is deprecated; read as 'specstride'",
+                          validated.stderr)
+            self.assertIn("configuration.wiggum_live is deprecated", validated.stderr)
+            self.assertIn("'wiggum-phase:' prefix", validated.stderr)
+
+            launcher = repository / "run-007.sh"
+            rendered = self._run_env(environment, sys.executable, SCRIPTS / "render_launcher.py",
+                                     "--contract", contract, "--output", launcher, cwd=repository)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            self.assertIn("deprecated", rendered.stderr)
+            bundle = next((repository / ".mixture-of-loops" / "generated").rglob("launch-contract.json"))
+            published = json.loads(bundle.read_text())
+            stage = published["stages"][0]
+            self.assertEqual(stage["kind"], "specstride")
+            self.assertEqual(stage["action"]["argv"][:2], ["specstride", "run"])
+            self.assertEqual(sorted(stage["action"]["env"]),
+                             ["SPECSTRIDE_AGENT_STREAM", "SPECSTRIDE_LIVE_DETAIL"])
+            self.assertEqual(stage["preconditions"][0]["name"], "specstride")
+            self.assertEqual(published["configuration"], {"specstride_live": True})
+            self.assertEqual(published["coverage"][0]["timing"], "specstride-phase:1")
+
+            planned = self._run_env(environment, launcher, "--dry-run", "--no-color", cwd=repository)
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            self.assertIn('"specstride" "run" "-w" "." "-s" "spec.md" "--feature" "007"', planned.stdout)
+
+            executed = self._run_env(environment, launcher, "--no-color", cwd=repository)
+            self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+            invocation = json.loads((repository / "invocation.json").read_text())
+            self.assertEqual(invocation["argv0"], "specstride")
+            self.assertIn("--no-live", invocation["args"])
+            self.assertEqual(invocation["env"]["SPECSTRIDE_LIVE"], "false")
+            self.assertEqual(invocation["env"]["WIGGUM_LIVE"], "false")
+            self.assertEqual(invocation["env"]["SPECSTRIDE_LIVE_DETAIL"], "full")
+            # the legacy `.wiggum/…` postcondition resolved to the fresh `.specstride/`
+            self.assertFalse((repository / ".wiggum").exists())
+
+    def test_specstride_kind_validates_without_a_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            contract, environment = self._alias_fixture(repository, "specstride")
+            validated = self._run_env(environment, sys.executable, SCRIPTS / "validate_contract.py",
+                                      contract, cwd=repository)
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            self.assertEqual(validated.stderr, "")
+            launcher = repository / "run-007.sh"
+            rendered = self._run_env(environment, sys.executable, SCRIPTS / "render_launcher.py",
+                                     "--contract", contract, "--output", launcher, cwd=repository)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            self.assertEqual(rendered.stderr, "")
+            planned = self._run_env(environment, launcher, "--dry-run", "--no-color", cwd=repository)
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            self.assertIn('"specstride" "run"', planned.stdout)
+            self.assertNotIn("[WARN]", planned.stderr)
+
+    def test_state_paths_follow_the_legacy_state_dir_when_only_it_exists(self) -> None:
+        sys.path.insert(0, str(SCRIPTS))
+        try:
+            import runtime
+        finally:
+            sys.path.remove(str(SCRIPTS))
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            self.assertEqual(runtime.path_for(".wiggum/x", repository), repository / ".specstride" / "x")
+            (repository / ".wiggum").mkdir()
+            self.assertEqual(runtime.path_for(".specstride/x", repository), repository / ".wiggum" / "x")
+            (repository / ".specstride").mkdir()
+            self.assertEqual(runtime.path_for(".wiggum/x", repository), repository / ".specstride" / "x")
+            self.assertEqual(runtime.path_for("other/x", repository), repository / "other" / "x")
+
+    def test_rename_guard_only_alias_sites_mention_the_old_name(self) -> None:
+        """Specstride was formerly Wiggum. Only the alias sites and the historical
+        prompt may still carry the old name; a reintroduction elsewhere fails here."""
+        historical = {"prompts/mixture-of-loops-skill-prompt.md", "tests/test_mixture_of_loops.py"}
+        alias_lines = {
+            "skills/mixture-of-loops/scripts/contract_lib.py": [
+                r'^LEGACY_(KIND|COMMAND) = "wiggum"$', r'^LEGACY_ENV_PREFIX = "WIGGUM_"$',
+                r'^LEGACY_TIMING_PREFIX = "wiggum-phase:"$', r'^LEGACY_LIVE_KEY = "wiggum_live"$',
+                r'^LEGACY_STATE_DIRNAME = "\.wiggum"$', r"^# Specstride was formerly Wiggum\.",
+                r"Stage kind \"wiggum\" becomes", r"coverage timing \"wiggum-phase:N\"",
+                r"configuration\.wiggum_live becomes$",
+                r"\(argv or command_available check\) becomes `specstride` and WIGGUM_\* action$",
+                r"\(Specstride was formerly Wiggum\)\"\)$",
+            ],
+            "skills/mixture-of-loops/scripts/runtime.py": [
+                r'effective\["env"\]\["WIGGUM_LIVE"\] = "false"   # older checkouts \(formerly Wiggum\)$',
+            ],
+            "skills/mixture-of-loops/assets/launch-contract.schema.json": [
+                r'"kind": \{"enum": \["setup", "decision", "command", "specstride", "wiggum", "smoke"\]',
+            ],
+            "README.md": [
+                r"^Specstride was formerly Wiggum: contracts that still use the$",
+                r"^`wiggum` stage kind keep validating with a deprecation warning",
+            ],
+            "skills/mixture-of-loops/references/contract.md": [
+                r"^Specstride was formerly Wiggum\. Contracts written before the rename still validate:$",
+                r"^the stage kind `wiggum` is a deprecated alias",
+                r"^legacy `wiggum` command \(argv or `command_available` check\)",
+                r"^`WIGGUM_\*` action env keys to `SPECSTRIDE_\*`, reads `configuration\.wiggum_live`",
+                r"^`specstride_live`, and reads coverage timing `wiggum-phase:N`",
+                r"^Paths under a workdir's `\.specstride/` or legacy `\.wiggum/` state dir",
+                r"^and `WIGGUM_LIVE=false`, so older checkouts behave the same\.$",
+            ],
+            "skills/mixture-of-loops/references/derivation.md": [
+                r"the local Specstride checkout \(then still named Wiggum\)",
+            ],
+        }
+        import re
+        tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True,
+                                 check=True).stdout.decode().split("\0")
+        offenders = []
+        for relative in filter(None, tracked):
+            path = ROOT / relative
+            if relative in historical or path.is_symlink() or not path.is_file():
+                continue
+            allowed = [re.compile(pattern) for pattern in alias_lines.get(relative, [])]
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search("wiggum", line, re.I) and not any(rx.search(line) for rx in allowed):
+                    offenders.append(f"{relative}:{number}: {line.strip()[:120]}")
+        self.assertEqual(offenders, [])
+        for relative, patterns in alias_lines.items():   # no stale allowlist entries
+            lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+            for pattern in patterns:
+                self.assertTrue(any(re.search(pattern, line) for line in lines), (relative, pattern))
 
 
 if __name__ == "__main__":

@@ -2,8 +2,11 @@
 
 `mixture-of-loops` is one maintained Agent Skills package for Claude Code, Codex,
 and DeepSeek Harness (dsh). It reads Spec Kit feature artifacts holistically and
-generates a provenance-bound launch contract plus an executable, unattended Wiggum
+generates a provenance-bound launch contract plus an executable, unattended Specstride
 pipeline.
+
+Specstride was formerly Wiggum: contracts that still use the
+`wiggum` stage kind keep validating with a deprecation warning and launch `specstride run`.
 
 The canonical skill is [skills/mixture-of-loops/SKILL.md](skills/mixture-of-loops/SKILL.md).
 All three harnesses should link to that directory so fixes do not drift between copies.
@@ -36,7 +39,7 @@ sequenceDiagram
     participant V as validate_contract.py
     participant R as render_launcher.py
     participant L as run-007.sh
-    participant W as Wiggum
+    participant W as Specstride
 
     U->>S: derive a pipeline for specs/007-example
     S->>B: --repo / --feature
@@ -50,7 +53,7 @@ sequenceDiagram
     R->>L: content-addressed bundle + launcher
     U->>L: ./run-007.sh with --dry-run, --implement or --smoke
     L->>L: re-hash sources, take lock, skip stages<br/>whose postconditions still hold
-    L->>W: wiggum run --verification-commands …
+    L->>W: specstride run --verification-commands …
     W-->>L: exit code + run_stop.reason
     L-->>U: final digest — stage, evidence paths, next action
 ```
@@ -76,10 +79,10 @@ binding and skip stages that already hold.
 Declared verification commands are **preserved, never invented**. An existing
 `verification-commands.json` is kept as authored; otherwise candidates come only from
 commands literally declared in `plan.md` / `tasks.md`. Each one is reconciled and counted
-along `source phase -> command id -> Wiggum phase -> gate`, so omissions, collisions, and
+along `source phase -> command id -> Specstride phase -> gate`, so omissions, collisions, and
 duplicates are visible rather than plausible. Conflicting declarations, or a shell
 expression that cannot be expressed as fixed `argv`, become a blocker instead of a guess,
-and a phase with no declared commands stays explicitly empty. Wiggum's own discovered
+and a phase with no declared commands stays explicitly empty. Specstride's own discovered
 project tests still run, but they are supplemental and are never reported as the declared
 gate.
 
@@ -88,7 +91,7 @@ gate.
 - Linux or macOS local execution
 - Python 3.10 or newer (standard library only)
 - Bash 4 or newer for the generated launcher
-- a Wiggum installation compatible with the options selected in the contract
+- a Specstride installation compatible with the options selected in the contract
 
 Cloud-hosted skill synchronization and Windows execution have not been validated by this
 package.
@@ -165,7 +168,7 @@ shellcheck bin/onboard-skill
 ```
 
 The test suite uses temporary repositories and stub commands. It does not call a model,
-run Wiggum, provision infrastructure, or install the skill.
+run Specstride, provision infrastructure, or install the skill.
 
 Validation on 2026-09-09 covered skill structure, repository-scope discovery links, and
 the installed harness layouts (Codex CLI 0.153.4, Claude Code 2.1.266, dsh 0.1.0-rc.8).

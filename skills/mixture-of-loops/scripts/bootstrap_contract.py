@@ -275,7 +275,7 @@ def build_contract(root: Path, features: list[Path]) -> dict:
                 "id": stable_obligation_id(task),
                 "source": {"path": task["source"], "line": task["line"], "anchor": task["id"]},
                 "kind": "implementation",
-                "timing": f"wiggum-phase:{task['phase']}" if task["phase"] else "unclassified",
+                "timing": f"specstride-phase:{task['phase']}" if task["phase"] else "unclassified",
                 "producer": "unclassified",
                 "disposition": "unresolved",
                 "stage_ids": [],
@@ -305,7 +305,7 @@ def build_contract(root: Path, features: list[Path]) -> dict:
         },
         "configuration": {
             "color": "auto",
-            "wiggum_live": True,
+            "specstride_live": True,
             "agent_stream": True,
             "live_detail": "full",
             "telemetry": {"loki": {"enabled": False}, "otel": {"enabled": False}},
