@@ -24,6 +24,65 @@ The skill inventories the supplied feature artifacts, records their provenance i
 contract, validates the contract, and renders a Bash launcher. Generation does not execute
 the pipeline unless the request separately asks for execution.
 
+## How it works
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant S as Skill (model)
+    participant B as bootstrap_contract.py
+    participant C as launch-contract.json
+    participant V as validate_contract.py
+    participant R as render_launcher.py
+    participant L as run-007.sh
+    participant W as Wiggum
+
+    U->>S: derive a pipeline for specs/007-example
+    S->>B: --repo / --feature
+    B->>C: draft — sources + SHA-256, tasks, phases,<br/>declared commands, one open blocker
+    Note over B,C: Tier 1: deterministic facts only.<br/>Nothing is inferred here.
+    S->>C: Tier 2/3 — map commands to phases, classify<br/>obligations, build the stage graph
+    Note over S,C: Each entry gets provenance, a disposition<br/>and the evidence it must produce.
+    S->>V: validate contract
+    V-->>S: validated, or blockers (exit 20 / 23)
+    S->>R: render (validated contracts only)
+    R->>L: content-addressed bundle + launcher
+    U->>L: ./run-007.sh with --dry-run, --implement or --smoke
+    L->>L: re-hash sources, take lock, skip stages<br/>whose postconditions still hold
+    L->>W: wiggum run --verification-commands …
+    W-->>L: exit code + run_stop.reason
+    L-->>U: final digest — stage, evidence paths, next action
+```
+
+### Why it is split this way
+
+The failure this design targets is **silent omission**: a generic test passes while a
+command or policy the plan named was never exercised. So facts and judgment are separated.
+The bootstrap only records what is literally in the files, and marks the contract `draft`
+with an open blocker. The model then fills in the parts that need reading — what a task
+means, when a prerequisite must hold, which stage enforces it — and every entry it adds
+carries a source path, a line, and the evidence it is expected to produce. The renderer
+refuses anything still `draft`, stale, or blocked, so an unreviewed pipeline cannot become
+an executable script.
+
+The contract is the artifact; the launcher is disposable. Sources are hashed (with task
+checkboxes normalized, so progress is not mistaken for a requirements change) and the
+bundle is content-addressed, which is what makes resume safe: the runtime can re-check the
+binding and skip stages that already hold.
+
+### Where the tests come from
+
+Declared verification commands are **preserved, never invented**. An existing
+`verification-commands.json` is kept as authored; otherwise candidates come only from
+commands literally declared in `plan.md` / `tasks.md`. Each one is reconciled and counted
+along `source phase -> command id -> Wiggum phase -> gate`, so omissions, collisions, and
+duplicates are visible rather than plausible. Conflicting declarations, or a shell
+expression that cannot be expressed as fixed `argv`, become a blocker instead of a guess,
+and a phase with no declared commands stays explicitly empty. Wiggum's own discovered
+project tests still run, but they are supplemental and are never reported as the declared
+gate.
+
 ## Requirements
 
 - Linux or macOS local execution
