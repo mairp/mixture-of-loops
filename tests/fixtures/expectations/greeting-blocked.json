@@ -1,0 +1,53 @@
+{
+  "declared_commands": [
+    {
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "path": "specs/001-greeting/plan.md",
+      "start_line": 12,
+      "text": "python3 -m unittest discover -s tests -v"
+    }
+  ],
+  "expected_outcome": "blocked",
+  "feature": "specs/001-greeting",
+  "fixture": "greeting-blocked",
+  "prerequisite": {
+    "file": "approvals/release-approval.json",
+    "id": "PRE-001",
+    "line": 17,
+    "path": "specs/001-greeting/plan.md",
+    "present": false
+  },
+  "sources": {
+    "specs/001-greeting/plan.md": {
+      "kind": "plan",
+      "sha256": "39af518c95a42b2656b4754fc47e26ea537ab2f4c8aee8b7cb6e9369839d79b5"
+    },
+    "specs/001-greeting/spec.md": {
+      "kind": "spec",
+      "sha256": "53e2e9b9d136834e5de10882408d8406004a0969eab6531a8f3d91078345e3ea"
+    },
+    "specs/001-greeting/tasks.md": {
+      "kind": "tasks",
+      "semantic_sha256": "ea5dffce911a5dad17b0ae8b64c4a58abb35f03349b6ee357a2fcdc8a50f261e",
+      "sha256": "ea5dffce911a5dad17b0ae8b64c4a58abb35f03349b6ee357a2fcdc8a50f261e"
+    }
+  },
+  "tasks": [
+    {
+      "id": "T001",
+      "phase": 1
+    },
+    {
+      "id": "T002",
+      "phase": 2
+    }
+  ]
+}

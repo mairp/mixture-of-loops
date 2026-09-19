@@ -1,0 +1,366 @@
+"""Tier 1 (hermetic): the Tier 3 transcript parser and assertions, without a model.
+
+Synthetic pi and prime JSONL transcripts are paired with real fixture repositories
+whose contracts were completed by hand (mol_e2e.reference_contract), so every
+verdict the live runner can give is checked here: success, a model error that
+still exits 0, a missing script call, a failed tool result, a timeout, and the
+blocked-outcome variants.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "e2e"))
+import mol_e2e  # noqa: E402
+import run_harness_e2e  # noqa: E402
+
+SKILL_MD = "/tmp/x/repo/.agents/skills/mixture-of-loops/SKILL.md"
+S = "/tmp/x/repo/.agents/skills/mixture-of-loops/scripts"
+
+
+def event(kind: str, **fields: object) -> str:
+    return json.dumps({"type": kind, **fields})
+
+
+class Script:
+    """Builds a harness-shaped JSONL transcript."""
+
+    def __init__(self, harness: str, explicit: bool = True):
+        self.harness = harness
+        self.lines = [event("session", version=3)]
+        prompt = "derive a pipeline for specs/001-greeting"
+        if explicit:
+            prompt = f'<skill name="mixture-of-loops" location="{SKILL_MD}">\nReferences are relative to x.\n\nbody\n</skill>\n\n{prompt}'
+        self.lines.append(event("message_end", message={"role": "user", "content": [{"type": "text", "text": prompt}]}))
+        self.count = 0
+
+    def tool(self, name: str, args: dict, error: bool = False, output: str = "") -> "Script":
+        self.count += 1
+        identifier = f"call-{self.count}"
+        self.lines.append(event("tool_execution_start", toolCallId=identifier, toolName=name, args=args))
+        self.lines.append(event("tool_execution_end", toolCallId=identifier, toolName=name, isError=error,
+                                result={"content": [{"type": "text", "text": output}]}))
+        return self
+
+    def shell(self, command: str, error: bool = False) -> "Script":
+        if self.harness == "pi":
+            return self.tool("bash", {"command": command}, error)
+        return self.tool("ipython", {"code": f"%%bash\n{command}"}, error)
+
+    def read_skill(self) -> "Script":
+        if self.harness == "pi":
+            return self.tool("read", {"path": SKILL_MD})
+        return self.tool("ipython", {"code": f"print(open('{SKILL_MD}').read())"})
+
+    def end(self, stop: str = "stop", error: str | None = None) -> list[str]:
+        message = {"role": "assistant", "content": [{"type": "text", "text": "done"}], "stopReason": stop}
+        if error:
+            message["errorMessage"] = error
+        self.lines.append(event("message_end", message=message))
+        self.lines.append(event("agent_end", messages=[message]))
+        return self.lines
+
+
+def happy_script(harness: str, blocked: bool = False, explicit: bool = True) -> Script:
+    script = Script(harness, explicit)
+    if not explicit:
+        script.read_skill()
+    script.shell(f"python3 {S}/bootstrap_contract.py --repo . --feature specs/001-greeting --output launch-contract.json")
+    script.shell(f"python3 {S}/validate_contract.py launch-contract.json", error=blocked)
+    if not blocked:
+        script.shell(f"python3 {S}/render_launcher.py --contract launch-contract.json --output run-001-greeting.sh")
+        script.shell("bash -n run-001-greeting.sh && ./run-001-greeting.sh --dry-run")
+    return script
+
+
+class E2ELogicTests(unittest.TestCase):
+    def repo(self, fixture: str, *, render: bool = True) -> tuple[Path, Path]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        repo = mol_e2e.prepare_fixture(fixture, base / "repo")
+        contract = repo / "launch-contract.json"
+        result = mol_e2e.run_script("bootstrap_contract.py", "--repo", repo, "--feature", "specs/001-greeting",
+                                    "--output", contract, cwd=repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        draft = json.loads(contract.read_text(encoding="utf-8"))
+        contract.write_text(json.dumps(mol_e2e.reference_contract(draft, fixture), indent=2), encoding="utf-8")
+        if render and fixture == "greeting-ready":
+            rendered = mol_e2e.run_script("render_launcher.py", "--contract", contract, "--output",
+                                          repo / "run-001-greeting.sh", cwd=repo)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        return base, repo
+
+    def evaluate(self, fixture: str, lines: list[str], repo: Path, base: Path, **extra) -> dict[str, str]:
+        context = mol_e2e.RunContext(harness="pi", mode="explicit", fixture=fixture, repo=repo,
+                                     transcript=mol_e2e.parse_transcript(lines), work=base, **extra)
+        results = mol_e2e.evaluate(context)
+        self.last = results
+        return {r["name"]: r["status"] for r in results}
+
+    def failures(self, verdicts: dict[str, str]) -> list[str]:
+        return sorted(name for name, status in verdicts.items() if status == "fail")
+
+    # parser
+    def test_parser_normalizes_pi_and_prime_calls(self) -> None:
+        pi = mol_e2e.parse_transcript(happy_script("pi", explicit=False).end())
+        self.assertEqual([c.kind for c in pi.calls], ["read", "shell", "shell", "shell", "shell"])
+        self.assertEqual(pi.calls[1].via, "bash")
+        self.assertTrue(pi.calls[1].runs("bootstrap_contract.py"))
+        self.assertTrue(pi.agent_end)
+        self.assertEqual(pi.stop_reason, "stop")
+
+        prime = Script("prime")
+        prime.tool("ipython", {"code": f"!python3 {S}/bootstrap_contract.py --repo . --output c.json"})
+        prime.tool("ipython", {"code": f"\n%%bash\ncd /tmp/x/repo\npython3 {S}/validate_contract.py c.json"})
+        prime.tool("ipython", {"code": f"import subprocess\nsubprocess.run(['python3', '{S}/render_launcher.py'])"})
+        prime.tool("ipython", {"code": f"print(Path('{S}/../SKILL.md').read_text())"})
+        prime.tool("ipython", {"code": "%%bash\ncat scripts/validate_contract.py"})
+        parsed = mol_e2e.parse_transcript(prime.end())
+        self.assertEqual([c.via for c in parsed.calls], ["!", "%%bash", "python", "python", "%%bash"])
+        self.assertTrue(parsed.calls[0].runs("bootstrap_contract.py"))
+        self.assertTrue(parsed.calls[1].runs("validate_contract.py"))
+        self.assertFalse(parsed.calls[2].runs("render_launcher.py"), "subprocess is not %%bash or !")
+        self.assertEqual(parsed.calls[3].kind, "read")
+        self.assertFalse(parsed.calls[4].runs("validate_contract.py"), "reading a script is not running it")
+        self.assertEqual(mol_e2e.parse_transcript(["not json", "", "{}"]).bad_lines, 1)
+
+    # verdicts
+    def test_success_passes_for_both_harnesses_and_both_fixtures(self) -> None:
+        for harness in ("pi", "prime"):
+            for fixture in mol_e2e.FIXTURE_NAMES:
+                with self.subTest(harness=harness, fixture=fixture):
+                    base, repo = self.repo(fixture)
+                    blocked = fixture == "greeting-blocked"
+                    verdicts = self.evaluate(fixture, happy_script(harness, blocked).end(), repo, base,
+                                             home_changes=[], checkout_changed=[])
+                    self.assertEqual(self.failures(verdicts), [], self.last)
+                    self.assertEqual(mol_e2e.summarize(self.last), "pass")
+                    expected = ({"blocker-points-at-prerequisite", "independent-validation-blocked", "no-launcher-rendered"}
+                                if blocked else {"launcher-dry-run", "dry-run-read-only", "prerequisite-enforced"})
+                    self.assertLessEqual(expected, {n for n, s in verdicts.items() if s == "pass"})
+
+    def test_model_error_with_exit_zero_fails_the_terminal_state(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        lines = happy_script("pi").end(stop="error", error="Connection error.")
+        verdicts = self.evaluate("greeting-ready", lines, repo, base)
+        self.assertEqual(verdicts["terminal-state"], "fail")
+        no_end = [line for line in happy_script("prime").end() if '"agent_end"' not in line]
+        self.assertEqual(self.evaluate("greeting-ready", no_end, repo, base)["terminal-state"], "fail")
+
+    def test_missing_script_call_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        lines = [line for line in happy_script("pi").end() if "render_launcher.py" not in line]
+        verdicts = self.evaluate("greeting-ready", lines, repo, base)
+        self.assertEqual(verdicts["ran:render_launcher.py"], "fail")
+        self.assertEqual(verdicts["render-succeeded"], "fail")
+
+    def test_failed_tool_result_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        script = Script("prime")
+        script.shell(f"python3 {S}/bootstrap_contract.py --repo . --output launch-contract.json", error=True)
+        script.shell(f"python3 {S}/validate_contract.py launch-contract.json")
+        script.shell(f"python3 {S}/render_launcher.py --contract launch-contract.json --output run.sh", error=True)
+        verdicts = self.evaluate("greeting-ready", script.end(), repo, base)
+        self.assertEqual(verdicts["bootstrap-succeeded"], "fail")
+        self.assertEqual(verdicts["render-succeeded"], "fail")
+
+    def test_timeout_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        partial = happy_script("pi").lines  # no agent_end: the run was killed
+        verdicts = self.evaluate("greeting-ready", partial, repo, base, timed_out=True, exit_code=-9)
+        self.assertEqual(verdicts["terminal-state"], "fail")
+        self.assertEqual(verdicts["no-input-wait"], "fail")
+
+    def test_skill_not_loaded_and_scripts_outside_shell_fail(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        script = Script("prime", explicit=False)
+        script.tool("ipython", {"code": f"import subprocess\nsubprocess.run(['python3', '{S}/bootstrap_contract.py'])"})
+        verdicts = self.evaluate("greeting-ready", script.end(), repo, base)
+        self.assertEqual(verdicts["skill-loaded"], "fail")
+        self.assertEqual(verdicts["scripts-only-via-shell"], "fail")
+        self.assertEqual(verdicts["ran:bootstrap_contract.py"], "fail")
+
+    def test_blocked_fixture_wrong_outcomes_fail(self) -> None:
+        # rendered anyway, and the approval was fabricated
+        base, repo = self.repo("greeting-blocked")
+        contract = repo / "launch-contract.json"
+        value = json.loads(contract.read_text(encoding="utf-8"))
+        value["findings"] = [f for f in value["findings"] if f["id"] != "missing-release-approval"]
+        value["status"] = "validated"
+        contract.write_text(json.dumps(value), encoding="utf-8")
+        self.assertEqual(mol_e2e.run_script("render_launcher.py", "--contract", contract, "--output",
+                                            repo / "run.sh", cwd=repo).returncode, 0)
+        (repo / "approvals").mkdir()
+        (repo / "approvals/release-approval.json").write_text("{}", encoding="utf-8")
+        verdicts = self.evaluate("greeting-blocked", happy_script("pi").end(), repo, base)
+        for name in ("prerequisite-not-fabricated", "independent-validation-blocked",
+                     "blocker-points-at-prerequisite", "no-launcher-rendered"):
+            self.assertEqual(verdicts[name], "fail", name)
+
+    def test_blocker_must_point_at_the_prerequisite_source(self) -> None:
+        base, repo = self.repo("greeting-blocked")
+        contract = repo / "launch-contract.json"
+        value = json.loads(contract.read_text(encoding="utf-8"))
+        for finding in value["findings"]:
+            if finding["id"] == "missing-release-approval":
+                finding["source"] = {"path": "specs/001-greeting/spec.md", "line": 1, "anchor": "spec"}
+        contract.write_text(json.dumps(value), encoding="utf-8")
+        verdicts = self.evaluate("greeting-blocked", happy_script("pi", blocked=True).end(), repo, base)
+        self.assertEqual(verdicts["blocker-points-at-prerequisite"], "fail")
+
+    def test_ready_fixture_contract_problems_fail(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        contract = repo / "launch-contract.json"
+        value = json.loads(contract.read_text(encoding="utf-8"))
+        value["stages"][1]["action"]["argv"] = ["python3", "-m", "pytest"]      # an invented command
+        value["stages"][0]["preconditions"] = value["stages"][0]["preconditions"][1:]  # prerequisite dropped
+        value["sources"][0]["sha256"] = "0" * 64
+        contract.write_text(json.dumps(value), encoding="utf-8")
+        verdicts = self.evaluate("greeting-ready", happy_script("pi").end(), repo, base)
+        for name in ("declared-command-preserved", "prerequisite-enforced", "sources-match-expectations",
+                     "independent-validation-validated"):
+            self.assertEqual(verdicts[name], "fail", name)
+
+    def test_dry_run_that_writes_or_calls_specstride_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        launcher = repo / "run-001-greeting.sh"
+        text = launcher.read_text(encoding="utf-8")
+        edited = text.replace("exec python3", 'mkdir -p "$SCRIPT_DIR/.specstride"; specstride run -w . || true\nexec python3')
+        launcher.write_text(edited, encoding="utf-8")
+        verdicts = {v["name"]: v for v in mol_e2e.check_launcher(repo, base)}
+        self.assertEqual(verdicts["dry-run-read-only"]["status"], "fail", verdicts)
+        self.assertIn(".specstride", verdicts["dry-run-read-only"]["detail"])
+        self.assertIn("REFUSED", subprocess.run([str(mol_e2e.STUB_BIN / "specstride"), "run"],
+                                                capture_output=True, text=True).stderr)
+
+    def test_side_effect_checks_fail_when_reported(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        verdicts = self.evaluate("greeting-ready", happy_script("pi").end(), repo, base,
+                                 home_changes=["changed  /root/.pi/agent/trust.json"],
+                                 checkout_changed=["?? skills/mixture-of-loops/launch-contract.json"],
+                                 harness_stub_calls=[{"argv": ["run", "-w", "."]}])
+        for name in ("real-homes-unchanged", "checkout-unchanged", "no-pipeline-started"):
+            self.assertEqual(verdicts[name], "fail", name)
+
+    def test_model_allowlist_rejects_everything_but_the_local_model(self) -> None:
+        check = run_harness_e2e.check_allowlist
+        local = run_harness_e2e.LOCAL_MODEL
+        claude_env = {"ANTHROPIC_BASE_URL": run_harness_e2e.SHIM,
+                      **{v: local for v in run_harness_e2e.CLAUDE_MODEL_VARIABLES}}
+        check("pi", ["pi", "-p", "--model", "litellm/qwen3.8-27b-q5", "x"], {})
+        check("prime", ["prime", "qwen", "-p", "x"], {})
+        check("codex", ["codex", "exec", "-m", local, "x"], {})
+        check("claude", ["claude", "-p", "--model", local, "x"], claude_env)
+        rejected = [
+            ("pi", ["pi", "-p", "--model", "litellm/gpt-5", "x"], {}),
+            ("pi", ["pi", "-p", "x"], {}),
+            ("prime", ["prime", "auto", "-p", "x"], {}),
+            ("prime", ["prime", "sol", "-p", "x"], {}),
+            ("prime", ["prime", "qwen", "--model", "gpt-5.5", "-p", "x"], {}),
+            ("codex", ["codex", "exec", "-m", "gpt-5.6-luna", "x"], {}),
+            ("claude", ["claude", "-p", "--model", local, "x"], {**claude_env, "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5"}),
+            ("claude", ["claude", "-p", "--model", local, "x"], {**claude_env, "ANTHROPIC_BASE_URL": "https://api.anthropic.com"}),
+        ]
+        for harness, argv, environment in rejected:
+            with self.subTest(harness=harness, argv=argv):
+                with self.assertRaises(RuntimeError):
+                    check(harness, argv, environment)
+
+    def test_codex_and_claude_streams_normalize(self) -> None:
+        claude = mol_e2e.parse_claude_stream([
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "a", "name": "Skill", "input": {"skill": "mixture-of-loops"}},
+                {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": f"python3 {S}/validate_contract.py c.json"}}]}}),
+            json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b", "is_error": True}]}}),
+            json.dumps({"type": "result", "subtype": "success", "is_error": False}),
+        ])
+        self.assertEqual(claude.skill_invoked, ["mixture-of-loops"])
+        self.assertTrue(claude.calls[1].runs("validate_contract.py"))
+        self.assertIs(claude.calls[1].is_error, True)
+        self.assertEqual((claude.agent_end, claude.stop_reason), (True, "stop"))
+        codex = mol_e2e.parse_codex_stream([
+            json.dumps({"type": "item.completed", "item": {"id": "1", "type": "command_execution",
+                                                           "command": f"bash -lc 'python3 {S}/bootstrap_contract.py'",
+                                                           "exit_code": 2, "status": "failed"}}),
+            json.dumps({"type": "turn.failed", "error": {"message": "stream disconnected"}}),
+        ])
+        self.assertTrue(codex.calls[0].runs("bootstrap_contract.py"))
+        self.assertIs(codex.calls[0].is_error, True)
+        self.assertEqual((codex.stop_reason, codex.error_message), ("error", "stream disconnected"))
+
+    def test_reading_scripts_is_not_running_them_and_grader_access_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        script = happy_script("prime")
+        script.tool("ipython", {"code": f"print(open('{S}/bootstrap_contract.py').read())"})
+        script.tool("ipython", {"code": "%%bash\nsed -n 1,80p /src/checkout/tests/e2e/mol_e2e.py"})
+        script.tool("ipython", {"code": "%%bash\ngrep -rn 'timed out' .", }, output="x: Command timed out waiting")
+        verdicts = self.evaluate("greeting-ready", script.end(), repo, base, grader_paths=["/src/checkout/tests"])
+        self.assertNotIn("scripts-only-via-shell", verdicts, "open().read() of a script is not execution")
+        self.assertEqual(verdicts["no-input-wait"], "pass", "text mentioning a timeout is not a tool timeout")
+        self.assertEqual(verdicts["no-grader-access"], "fail")
+        script = happy_script("pi")
+        script.tool("bash", {"command": "sleep 999"}, error=True, output="Command timed out after 120 seconds")
+        self.assertEqual(self.evaluate("greeting-ready", script.end(), repo, base)["no-input-wait"], "fail")
+
+    def test_declared_command_in_a_verification_document_under_mixture_of_loops_counts(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        contract = repo / "launch-contract.json"
+        value = json.loads(contract.read_text(encoding="utf-8"))
+        value["stages"][1]["action"]["argv"] = ["/usr/bin/true"]
+        contract.write_text(json.dumps(value), encoding="utf-8")
+        verdicts = self.evaluate("greeting-ready", happy_script("pi").end(), repo, base)
+        self.assertEqual(verdicts["declared-command-preserved"], "fail")
+        (repo / ".mixture-of-loops/verification-commands.json").write_text(json.dumps({"commands": [
+            {"id": "VC-1", "executable": "python3", "args": ["-m", "unittest", "discover", "-s", "tests", "-v"]}]}))
+        verdicts = self.evaluate("greeting-ready", happy_script("pi").end(), repo, base)
+        self.assertEqual(verdicts["declared-command-preserved"], "pass")
+        generated = repo / ".mixture-of-loops/generated/copy.json"
+        (repo / ".mixture-of-loops/verification-commands.json").rename(generated)
+        verdicts = self.evaluate("greeting-ready", happy_script("pi").end(), repo, base)
+        self.assertEqual(verdicts["declared-command-preserved"], "fail", "renderer bundles are copies, not declarations")
+
+    def test_a_model_draft_under_generated_is_not_a_rendered_bundle(self) -> None:
+        base, repo = self.repo("greeting-blocked")
+        draft = repo / ".mixture-of-loops/generated/001-greeting/draft"
+        draft.mkdir(parents=True)
+        (draft / "launch-contract.json").write_text("{}", encoding="utf-8")
+        verdicts = self.evaluate("greeting-blocked", happy_script("pi", blocked=True).end(), repo, base)
+        self.assertEqual(verdicts["no-launcher-rendered"], "pass")
+        bundle = repo / ".mixture-of-loops/generated/001-greeting/0123456789abcdef0123"
+        bundle.mkdir()
+        (bundle / "launch-contract.json").write_text("{}", encoding="utf-8")
+        (bundle / "runtime.py").write_text("", encoding="utf-8")
+        verdicts = self.evaluate("greeting-blocked", happy_script("pi", blocked=True).end(), repo, base)
+        self.assertEqual(verdicts["no-launcher-rendered"], "fail")
+
+    def test_codex_skill_injection_is_reported_as_not_observable(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        lines = [json.dumps({"type": "turn.completed"})]
+        context = mol_e2e.RunContext(harness="codex", mode="explicit", fixture="greeting-ready", repo=repo,
+                                     transcript=mol_e2e.parse_codex_stream(lines), work=base)
+        verdicts = {v["name"]: v["status"] for v in mol_e2e.evaluate(context)}
+        self.assertEqual(verdicts["skill-loaded"], "skip")
+        context.harness = "pi"
+        self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "fail")
+
+    def test_reading_a_skill_resource_counts_as_loading_it(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        lines = [json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Read",
+                  "input": {"file_path": "/r/.claude/skills/mixture-of-loops/references/derivation.md"}}]}}),
+                 json.dumps({"type": "result", "subtype": "success", "is_error": False})]
+        context = mol_e2e.RunContext(harness="claude", mode="explicit", fixture="greeting-ready", repo=repo,
+                                     transcript=mol_e2e.parse_claude_stream(lines), work=base)
+        self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "pass")
+        context.transcript = mol_e2e.parse_claude_stream(lines[1:])
+        self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "fail")
+
+
+if __name__ == "__main__":
+    unittest.main()

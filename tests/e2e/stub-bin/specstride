@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Stub `specstride` for launcher --dry-run checks.
+
+It answers --version and --help, records every invocation, and refuses everything
+else loudly (exit 97): a dry-run must not run setup, start a pipeline or a model
+call, or create state or log directories. It never creates a file or directory
+itself; invocations are appended to $MOL_STUB_LOG only when that file's directory
+already exists.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+log = os.environ.get("MOL_STUB_LOG")
+if log and Path(log).parent.is_dir():
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"argv": args, "cwd": os.getcwd()}) + "\n")
+
+if args in (["--version"], ["-V"]):
+    print("specstride 0.0.0-stub")
+    raise SystemExit(0)
+if args and args[-1] in ("--help", "-h"):
+    print("usage: specstride (stub) — accepts only --version and --help")
+    raise SystemExit(0)
+print(f"stub specstride: REFUSED {args!r}: a dry-run must not run setup, pipelines, "
+      "model calls, or create state or log directories", file=sys.stderr)
+raise SystemExit(97)

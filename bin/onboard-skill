@@ -3,13 +3,18 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: onboard-skill --harness codex|claude|dsh|all --scope user|repo [options]
+Usage: onboard-skill --harness codex|claude|dsh|pi|prime|all --scope user|repo [options]
 
 Options:
   --repo DIR   Repository for --scope repo (default: current directory)
   --check      Verify the expected link without changing the filesystem
   --repair     Replace an existing symlink that points somewhere else
   -h, --help   Show this help
+
+Exit status: 0 ok, 2 usage, 3 missing source or repository, 4 unrelated path or
+link in the way, 5 link missing (--check), 6 a different mixture-of-loops skill
+is visible to pi or prime, 7 pi skips the repository link in headless runs
+because the project is untrusted (--harness pi --scope repo --check).
 EOF
 }
 
@@ -31,7 +36,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-case "$HARNESS" in codex|claude|dsh|all) ;; *) echo "onboard-skill: --harness is required" >&2; exit 2 ;; esac
+case "$HARNESS" in codex|claude|dsh|pi|prime|all) ;; *) echo "onboard-skill: --harness is required" >&2; exit 2 ;; esac
 case "$SCOPE" in user|repo) ;; *) echo "onboard-skill: --scope user|repo is required" >&2; exit 2 ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,15 +48,203 @@ if [[ "$SCOPE" == repo ]]; then
   REPO="$(cd "$REPO" && pwd)"
 fi
 
+# pi and prime expand a leading ~/ in their agent-dir variables.
+expand_home() {
+  local value="$1" tilde="~"
+  if [[ "$value" == "$tilde" ]]; then
+    printf '%s\n' "${HOME:?}"
+  elif [[ "$value" == "$tilde/"* ]]; then
+    printf '%s\n' "${HOME:?}/${value#"$tilde/"}"
+  else
+    printf '%s\n' "$value"
+  fi
+}
+
+agent_dir_for() {
+  case "$1" in
+    pi) expand_home "${PI_CODING_AGENT_DIR:-${HOME:?}/.pi/agent}" ;;
+    prime) expand_home "${PRIME_AGENT_CODING_AGENT_DIR:-${HOME:?}/.prime/agent}" ;;
+  esac
+}
+
 target_for() {
   case "$1:$SCOPE" in
     codex:user) printf '%s\n' "${HOME:?}/.agents/skills/mixture-of-loops" ;;
     claude:user) printf '%s\n' "${HOME:?}/.claude/skills/mixture-of-loops" ;;
     dsh:user) printf '%s\n' "${DSH_HOME:-${HOME:?}/.dsh}/skills/mixture-of-loops" ;;
+    pi:user|prime:user) printf '%s\n' "$(agent_dir_for "$1")/skills/mixture-of-loops" ;;
     codex:repo) printf '%s\n' "$REPO/.agents/skills/mixture-of-loops" ;;
     claude:repo) printf '%s\n' "$REPO/.claude/skills/mixture-of-loops" ;;
     dsh:repo) printf '%s\n' "$REPO/.dsh/skills/mixture-of-loops" ;;
+    pi:repo) printf '%s\n' "$REPO/.pi/skills/mixture-of-loops" ;;
+    prime:repo) printf '%s\n' "$REPO/.prime/agent/skills/mixture-of-loops" ;;
   esac
+}
+
+# Inspect what pi or prime would load: every SKILL.md named mixture-of-loops
+# in the roots the harness scans that is not the canonical file ("COLLISION"),
+# and, for pi at repository scope, whether a headless run trusts the project
+# ("TRUST"). Read-only; the roots mirror the installed loaders (see README).
+inspect_harness() {
+  python3 - "$1" "$SCOPE" "$REPO" "${HOME:?}" "$(agent_dir_for "$1")" "$SOURCE_DIR/SKILL.md" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+harness, scope, repo, home, agent_dir, canonical = sys.argv[1:]
+canonical = os.path.realpath(canonical)
+config_dir = ".pi" if harness == "pi" else ".prime/agent"
+home_agents = os.path.realpath(os.path.join(home, ".agents", "skills"))
+
+
+def expand(value, base):
+    value = os.path.expanduser(value) if value.startswith("~") else value
+    return os.path.normpath(os.path.join(base, value))
+
+
+def settings_entries(settings_file, base):
+    try:
+        entries = json.loads(Path(settings_file).read_text(encoding="utf-8")).get("skills", [])
+    except (OSError, ValueError, AttributeError):
+        return []
+    # Plain paths only; +/-/! filters and globs select within these roots.
+    return [expand(e, base) for e in entries if isinstance(e, str) and e and e[0] not in "+-!"
+            and not any(c in e for c in "*?[")]
+
+
+def frontmatter_name(path):
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip().strip("'\"") or None
+    return None
+
+
+def skill_files(root, seen, top=True):
+    """Yield (file, name) the way the loaders do: a directory holding SKILL.md is a
+    skill root; otherwise recurse (skipping dot entries and node_modules, following
+    symlinks, skipping broken ones); .md files directly in a root are skills too."""
+    real = os.path.realpath(root)
+    if real in seen or not os.path.isdir(root):
+        return
+    seen.add(real)
+    skill = os.path.join(root, "SKILL.md")
+    if os.path.isfile(skill):
+        yield skill, frontmatter_name(skill) or os.path.basename(root)
+        return
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return
+    for name in names:
+        if name.startswith(".") or name == "node_modules":
+            continue
+        path = os.path.join(root, name)
+        if os.path.isdir(path):
+            yield from skill_files(path, seen, top=False)
+        elif top and name.endswith(".md") and os.path.isfile(path):
+            yield path, frontmatter_name(path) or os.path.basename(root)
+
+
+def ancestor_agents_dirs(start):
+    current = os.path.realpath(start)
+    git_root = None
+    probe = current
+    while True:
+        if os.path.exists(os.path.join(probe, ".git")):
+            git_root = probe
+            break
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    result = []
+    while True:
+        candidate = os.path.join(current, ".agents", "skills")
+        if os.path.realpath(candidate) != home_agents:
+            result.append(candidate)
+        if current == git_root:
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return result
+
+
+roots = []
+if scope == "repo":
+    roots.append(os.path.join(repo, config_dir, "skills"))
+    roots += ancestor_agents_dirs(repo)
+    roots += settings_entries(os.path.join(repo, config_dir, "settings.json"), os.path.join(repo, config_dir))
+roots += [os.path.join(agent_dir, "skills"), os.path.join(home, ".agents", "skills")]
+roots += settings_entries(os.path.join(agent_dir, "settings.json"), agent_dir)
+
+seen = set()
+for root in roots:
+    for path, name in skill_files(root, seen):
+        if name == "mixture-of-loops" and os.path.realpath(path) != canonical:
+            real = os.path.realpath(path)
+            print(f"COLLISION\t{path}" + (f" -> {real}" if real != path else ""))
+
+if harness == "pi" and scope == "repo":
+    decision, reason = None, ""
+    try:
+        trust = json.loads(Path(agent_dir, "trust.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        trust = {}
+    current = os.path.realpath(repo)
+    while isinstance(trust, dict):
+        if trust.get(current) in (True, False):
+            decision, reason = trust[current], f"trust.json entry {current}"
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    if decision is None:
+        try:
+            default = json.loads(Path(agent_dir, "settings.json").read_text(encoding="utf-8")).get("defaultProjectTrust")
+        except (OSError, ValueError, AttributeError):
+            default = None
+        decision = default == "always"
+        reason = f"defaultProjectTrust={default or 'ask'} and no trust.json entry"
+    print(f"TRUST\t{'trusted' if decision else 'untrusted'}\t{reason}")
+PY
+}
+
+# Report pi/prime state from inspect_harness; returns 6 on a collision and, when
+# strict, 7 for an untrusted pi project.
+report_harness() {
+  local harness="$1" strict="$2" kind detail reason status=0
+  while IFS=$'\t' read -r kind detail reason; do
+    case "$kind" in
+      COLLISION)
+        echo "$harness: a different mixture-of-loops skill is visible: $detail" >&2
+        status=6 ;;
+      TRUST)
+        if [[ "$detail" == untrusted ]]; then
+          local message="not ok for headless runs: project $REPO is untrusted ($reason), so pi -p/--mode json skips repository skills; pass -a/--approve, or add a trust entry yourself"
+          if [[ "$strict" == true ]]; then
+            echo "$harness: $message" >&2
+            [[ $status -ne 0 ]] || status=7
+          else
+            echo "$harness: warning: $message" >&2
+          fi
+        else
+          echo "$harness: project trusted for headless runs ($reason)"
+        fi ;;
+    esac
+  done < <(inspect_harness "$harness")
+  return "$status"
 }
 
 install_one() {
@@ -66,7 +259,9 @@ install_one() {
     if [[ "$REPAIR" == true && "$CHECK" == false ]]; then
       unlink "$target"
     else
-      echo "$harness: existing link points elsewhere: $target -> $(readlink "$target")" >&2
+      local broken=""
+      [[ -e "$target" ]] || broken=" (broken)"
+      echo "$harness: existing link points elsewhere$broken: $target -> $(readlink "$target")" >&2
       return 4
     fi
   fi
@@ -83,6 +278,21 @@ install_one() {
   printf '%s: linked %s -> %s\n' "$harness" "$target" "$SOURCE_DIR"
 }
 
+# pi and prime: refuse to add a link next to a different skill of the same name,
+# then link, then report collisions and pi project trust.
+install_native() {
+  local harness="$1"
+  if [[ "$CHECK" == false ]] && inspect_harness "$harness" | grep -q '^COLLISION'; then
+    report_harness "$harness" false || true
+    echo "$harness: refusing to link while a different mixture-of-loops skill is visible" >&2
+    return 6
+  fi
+  local status=0 reported=0
+  install_one "$harness" || status=$?
+  report_harness "$harness" "$CHECK" || reported=$?
+  return $(( status ? status : reported ))
+}
+
 if [[ "$HARNESS" == all ]]; then
   install_one codex
   install_one claude
@@ -91,6 +301,16 @@ if [[ "$HARNESS" == all ]]; then
   else
     install_one dsh
   fi
+  # pi and prime always scan $HOME/.agents/skills and, from the working directory up
+  # to the git root, .agents/skills; their agent-dir variables never remove that.
+  status=0
+  for harness in pi prime; do
+    echo "$harness: shared through the .agents/skills link (one discovery entry)"
+    report_harness "$harness" false || { code=$?; (( status )) || status=$code; }
+  done
+  exit "$status"
+elif [[ "$HARNESS" == pi || "$HARNESS" == prime ]]; then
+  install_native "$HARNESS"
 else
   install_one "$HARNESS"
 fi

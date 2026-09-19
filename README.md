@@ -1,7 +1,7 @@
 # mixture-of-loops
 
 `mixture-of-loops` is one maintained Agent Skills package for Claude Code, Codex,
-and DeepSeek Harness (dsh). It reads Spec Kit feature artifacts holistically and
+DeepSeek Harness (dsh), pi, and prime (Prime Intellect's pi-based agent). It reads Spec Kit feature artifacts holistically and
 generates a provenance-bound launch contract plus an executable, unattended Specstride
 pipeline.
 
@@ -9,7 +9,7 @@ Specstride was formerly Wiggum: contracts that still use the
 `wiggum` stage kind keep validating with a deprecation warning and launch `specstride run`.
 
 The canonical skill is [skills/mixture-of-loops/SKILL.md](skills/mixture-of-loops/SKILL.md).
-All three harnesses should link to that directory so fixes do not drift between copies.
+All five harnesses link to that directory so fixes do not drift between copies.
 
 ## Use
 
@@ -21,7 +21,14 @@ $mixture-of-loops derive a pipeline for specs/007-example
 
 # Claude Code or dsh
 /mixture-of-loops derive a pipeline for specs/007-example
+
+# pi or prime
+/skill:mixture-of-loops derive a pipeline for specs/007-example
 ```
+
+A plain request that matches the skill description also works where the harness offers
+description-based invocation (Codex, Claude Code, pi, prime); see the tested results below
+for how reliably a local model does this.
 
 The skill inventories the supplied feature artifacts, records their provenance in a launch
 contract, validates the contract, and renders a Bash launcher. Generation does not execute
@@ -105,17 +112,24 @@ skill.
 ./bin/onboard-skill --harness codex --scope user
 ./bin/onboard-skill --harness claude --scope user
 ./bin/onboard-skill --harness dsh --scope user
+./bin/onboard-skill --harness pi --scope user
+./bin/onboard-skill --harness prime --scope user
 ```
 
-Install all three for the current user:
+Install for every harness for the current user:
 
 ```bash
 ./bin/onboard-skill --harness all --scope user
 ```
 
-The `all` form uses the shared `.agents/skills` location for both Codex and dsh, which
-prevents dsh from discovering the same skill through two default roots. If
-`DSH_AGENTS_HOME` points somewhere else, the linker adds the dsh-specific link as well.
+The `all` form creates the Codex (`.agents/skills`) and Claude Code (`.claude/skills`)
+links. dsh, pi and prime are satisfied by the shared `.agents/skills` link, which gives each
+of them one discovery entry. If `DSH_AGENTS_HOME` points somewhere else, the linker adds
+the dsh-specific link as well. pi and prime never get a native link from `all`: both scan
+`$HOME/.agents/skills` and, from the working directory up to the git root, `.agents/skills`
+whatever `PI_CODING_AGENT_DIR` or `PRIME_AGENT_CODING_AGENT_DIR` says; those variables only
+move the agent's own `skills` directory. Use `--harness pi` or `--harness prime` when you
+want the native link anyway; a second link to the same directory is deduplicated.
 
 For one repository, run from that repository or pass `--repo`:
 
@@ -130,6 +144,8 @@ The targets are:
 | Codex | `~/.agents/skills/mixture-of-loops` | `.agents/skills/mixture-of-loops` | `$mixture-of-loops` |
 | Claude Code | `~/.claude/skills/mixture-of-loops` | `.claude/skills/mixture-of-loops` | `/mixture-of-loops` |
 | dsh | `${DSH_HOME:-~/.dsh}/skills/mixture-of-loops` | `.dsh/skills/mixture-of-loops` | `/mixture-of-loops` |
+| pi | `${PI_CODING_AGENT_DIR:-~/.pi/agent}/skills/mixture-of-loops` | `.pi/skills/mixture-of-loops` | `/skill:mixture-of-loops` |
+| prime | `${PRIME_AGENT_CODING_AGENT_DIR:-~/.prime/agent}/skills/mixture-of-loops` | `.prime/agent/skills/mixture-of-loops` | `/skill:mixture-of-loops` |
 
 Codex and Claude Code both document symlinked skill folders. Codex scans `.agents/skills`
 from the working directory to the repository root and `~/.agents/skills`; Claude Code
@@ -140,6 +156,36 @@ the [official Codex skill documentation](https://developers.openai.com/codex/ski
 provider, which scans repository `.dsh/skills` and user `$DSH_HOME/skills` roots and
 follows symlinks.
 
+The pi and prime paths were read from the installed sources on 2026-09-19 (pi 0.80.6,
+`dist/core/package-manager.js` and `dist/core/skills.js`; prime-agent 0.7.3, the bundle
+that `prime-agent` actually runs, `dist/bundle/`). Both follow symlinks, skip broken links,
+drop a second link to the same real directory silently, and report a `collision` when two
+different files carry the same skill name (the first one found wins, repository scope
+first). prime does not search `.claude/skills`; its repository root is
+`.prime/agent/skills`, not `.prime/skills`. `agents/openai.yaml` is ignored by both.
+
+### pi: project trust
+
+pi loads repository skills (`.pi/skills` and repository `.agents/skills`) only for a
+trusted project. Headless runs (`pi -p`, `--mode json`) cannot ask, so an untrusted
+project's repository skills are **skipped silently**, and a user-scope link can hide
+that. Pass `-a`/`--approve` for the run, or trust the project yourself (pi's trust prompt
+in an interactive session writes `~/.pi/agent/trust.json`; `defaultProjectTrust: "always"`
+in pi's settings trusts every project). `--check` reports this: with `--harness pi --scope
+repo` an untrusted project exits 7 with the remedy; under `--harness all` the same line is
+a warning, because trust is a per-run choice. The linker never writes a trust file.
+
+### prime: tools and background service
+
+prime has no project-trust gate. Its only default tool is `ipython`, so the model runs the
+skill's scripts from `%%bash` cells (or `!` lines) and reads files from Python; the skill
+names no tool and works unchanged. Print and JSON runs go through a background daemon at
+`$TMPDIR/prime-agent-<uid>/daemon.sock` (or `--daemon-socket`), which keeps running after
+the run. `prime-agent shutdown` stops **every** prime-agent daemon on the host, so scripts
+should isolate runs with a private `TMPDIR`/`--daemon-socket` and stop only their own
+processes. Telemetry is on by default (`PRIME_AGENT_TELEMETRY=0`, `DO_NOT_TRACK=1` or
+`--offline` turns it off).
+
 After onboarding, inspect the link and skill without changing it:
 
 ```bash
@@ -148,8 +194,13 @@ After onboarding, inspect the link and skill without changing it:
 
 If this checkout moves, the absolute symlink breaks. Run the same onboarding command with
 `--repair`; it replaces only an existing symlink and refuses to replace a real file or
-directory. Do not keep copied harness variants: change the canonical package and let all
-three harnesses read it through their links.
+directory. For pi and prime, `--check` and installation also fail (exit 6) when a
+*different* `mixture-of-loops` skill is visible in any root that harness scans (agent-dir
+and `$HOME/.agents/skills`, plain paths in the harness's settings `skills` list, and at
+repository scope `.pi/skills` or `.prime/agent/skills` plus `.agents/skills` up to the git
+root); packages installed with `pi install` and prime's built-in skills are not scanned.
+Do not keep copied harness variants: change the canonical package and let every harness
+read it through its link.
 
 Codex normally detects changes automatically; restart if the skill does not appear. In
 Claude Code, use `/skills` and then `/mixture-of-loops`. In dsh, invoke it in the prompt,
@@ -159,19 +210,100 @@ for example:
 dsh --profile headless "/mixture-of-loops derive a pipeline for specs/007-example"
 ```
 
-## Develop and validate
+pi and prime run headless with JSON events on stdout. JSON mode exits 0 even when the
+model call fails, so check the final `stopReason` rather than the exit status:
 
 ```bash
+pi -p --mode json --no-session -a --model litellm/qwen3.8-27b-q5 --thinking off \
+  "/skill:mixture-of-loops derive a pipeline for specs/007-example" </dev/null
+prime qwen --mode json --no-session --thinking off \
+  -p "/skill:mixture-of-loops derive a pipeline for specs/007-example" </dev/null
+```
+
+## Develop and validate
+
+Three test tiers. Each runs on its own and reports what it covered; a missing prerequisite
+is a skip with the reason, never a pass.
+
+```bash
+# Tier 1: hermetic (no harness binaries, no model)
 python3 -m unittest discover -s tests -v
 bash -n bin/onboard-skill
 shellcheck bin/onboard-skill
+
+# Tier 2 alone: real discovery by the installed pi and prime loaders, no model
+python3 -m unittest tests.test_harness_discovery -v
+
+# Everything, including the live headless runs (opt-in; local model only)
+MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all
 ```
 
-The test suite uses temporary repositories and stub commands. It does not call a model,
-run Specstride, provision infrastructure, or install the skill.
+- **Tier 1** (`tests/test_mixture_of_loops.py`, `test_onboarding_harnesses.py`,
+  `test_fixtures.py`, `test_e2e_logic.py`) covers the scripts, the linker for every harness
+  (links, `--check`, `--repair`, collisions, pi trust, `--harness all` with and without the
+  agent-dir variables), the fixtures against independently derived expectations, and the
+  live runner's transcript parser and assertions on synthetic transcripts.
+- **Tier 2** (`tests/test_harness_discovery.py` with `tests/harness_probe.mjs`) imports each
+  harness's own resource loader (pi `dist/index.js`; prime the bundle chunks the CLI runs)
+  with a temporary `HOME` and agent directories, and checks: one discovery entry from the
+  canonical package, user-scope discovery from an unrelated directory, pi's silent skip of
+  an untrusted project in headless mode, prime's `.prime/agent/skills` root and ignored
+  `.claude/skills`, broken links, deduplication, collisions, and the harness's own
+  `/skill:` expansion. It skips when `node`, `pi` or `prime-agent` is missing.
+- **Tier 3** (`tests/e2e/run_harness_e2e.py`, also `tests/test_live_e2e.py` under
+  `MOL_LIVE_E2E=1`) runs each harness headlessly (stdin `/dev/null`, no controlling
+  terminal, hard timeout) against two fixture repositories in `tests/fixtures/`: one where a
+  non-delegable approval is missing, so the only correct outcome is a blocked draft whose
+  open blocker points at `plan.md:17`, and one where it is present, so the only correct
+  outcome is a validated contract and a launcher. Verdicts come from the event stream and
+  the filesystem: the skill was loaded, the three scripts ran, the contract re-validates,
+  its facts match `tests/fixtures/expectations/`, and the launcher passes `bash -n` and a
+  read-only `--dry-run` with a refusing stub `specstride` on `PATH`. Every run uses a
+  temporary `HOME`, agent directory, `TMPDIR` and daemon socket, telemetry off, and a
+  pristine copy of `bin/` and `skills/`, so a model cannot follow the skill link to this
+  repository's tests. The real `~/.pi`, `~/.prime`, `~/.agents` and `~/.claude/skills` are
+  snapshotted before and compared after each run. Only `qwen3.8-27b-q5` is allowed (pi
+  `litellm/qwen3.8-27b-q5`, prime variant `qwen`, Claude Code through the local shim, Codex
+  through LiteLLM); the runner skips instead of forcing a llama-swap model swap. Evidence
+  (transcripts, repositories, per-run `summary.json`, `report.json`) goes to a new
+  temporary directory; `--reevaluate DIR` re-scores saved runs without calling a model.
 
-Validation on 2026-09-09 covered skill structure, repository-scope discovery links, and
-the installed harness layouts (Codex CLI 0.153.4, Claude Code 2.1.266, dsh 0.1.0-rc.8).
-End-to-end skill invocation by each model host remains a live integration check because it
-would call configured model backends; the package does not label the local layout checks
-as a completed model run.
+### Results on 2026-09-19
+
+Tested with pi 0.80.6, prime-agent 0.7.3 (launcher `c9f77c3`), Codex CLI 0.153.4, Claude
+Code 2.1.278 and dsh 0.1.0-rc.8, on the local `qwen3.8-27b-q5` with thinking off. One
+sample per cell unless noted; a local model is not deterministic.
+
+| | pi | prime | Codex | Claude Code | dsh |
+| --- | --- | --- | --- | --- | --- |
+| Tier 1 | pass (44 tests) | pass | pass | pass | pass |
+| Tier 2 | pass | pass | not in scope | not in scope | not in scope |
+| Tier 3 `/skill:` or `$`/`/` form, blocked fixture | pass | 1 of 2 passed | pass | failed: model endpoint 500 | skipped |
+| Tier 3 `/skill:` or `$`/`/` form, ready fixture | pass | failed in 2 of 2 | pass | failed: model endpoint 500 | skipped |
+| Tier 3 plain request, blocked fixture | failed | failed | not run | not run | skipped |
+| Tier 3 plain request, ready fixture | pass | failed | not run | not run | skipped |
+| Deterministic facts identical across harnesses | yes | yes | yes | no contract | skipped |
+
+What the failures were:
+
+- pi and prime ran the rendered launcher **without** `--dry-run` as one of SKILL.md step 8's
+  "further stubbed checks", against whatever `specstride` was on `PATH` (here the refusing
+  stub, so nothing ran). This is the only failure in pi plain-request/blocked and in both
+  prime explicit/ready samples. With a real `specstride` it would start a pipeline.
+- prime sometimes ran the scripts through Python `subprocess` instead of `%%bash` or `!`
+  (counted as a failure), and in one plain-request run validated the blocked fixture,
+  relying on a runtime preflight check instead of stopping derivation as PRE-001 requires.
+- Claude Code: every request through the shim returned `500 qwen upstream error` from the
+  qwen chat template in llama.cpp; the serving route, not this package.
+- dsh has no per-run model flag; its model comes from `$DSH_HOME/settings.yaml` (off-host by
+  default), and a temporary `DSH_HOME` re-installs its plugins over the network, so it was
+  not run.
+- Codex: `codex exec --json` does not report `$skill` injection; skill use was confirmed by
+  its reads of `references/` under the skill directory.
+
+Tested rather than inferred: discovery paths, trust, deduplication and collisions for pi
+and prime (Tier 2, from the installed loaders); headless invocation, script execution,
+contract validity and the launcher dry-run for the cells marked pass. Inferred from the
+installed sources only: prime's daemon behaviour and `prime-agent shutdown` scope,
+telemetry switches, and the Codex, Claude Code and dsh discovery paths documented above
+(their live runs cover repository-scope `.agents/skills` and `.claude/skills` only).

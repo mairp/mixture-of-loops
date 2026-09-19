@@ -1,0 +1,6 @@
+{
+  "feature": "001-greeting",
+  "approved_by": "release-manager",
+  "signature": "fixture-signature-not-a-real-credential",
+  "scope": "release of 001-greeting"
+}
