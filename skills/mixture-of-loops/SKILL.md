@@ -13,17 +13,44 @@ Resolve relative resources from the directory containing this `SKILL.md`; call t
 directory `SKILL_ROOT`. Do not depend on a host-specific variable, hook, subagent, or
 tool name.
 
+Every fenced block below is a command line. Run it as one, in a shell, from the
+repository root, and read what it prints. Do not re-implement it through another
+language's process API: the working directory, the environment and the quoting are part
+of the command, and a wrapper is where they get lost. In a notebook-style harness that
+means a shell cell (`%%bash`) or a `!` line, not `subprocess.run`.
+
 ## Inputs and output
 
 Determine from the request and repository:
 
 - repository root and feature/spec paths;
 - output launcher path, defaulting to `.mixture-of-loops/run-<feature>.sh`;
-- explicit backend, model, budget, telemetry, infrastructure, and recovery choices.
+- explicit backend, model, budget, telemetry, infrastructure, and recovery choices;
+- the execution mode.
 
-Keep visible defaults for values the user did not specify. Generation writes a launch
-contract and launcher bundle; it does not execute the pipeline unless the user separately
-asks to run it.
+Keep visible defaults for values the user did not specify.
+
+### Mode
+
+| Mode | Behavior |
+| --- | --- |
+| `generate` (default) | Steps 1-9 only, through `bash -n` and `--dry-run`. Nothing is executed. |
+| `run` | Execute an already generated launcher. No re-derivation, no re-render. |
+| `auto` | `generate`, then `run` if and only if the launch gate passes. |
+
+Silence is not consent to execute. A request that does not ask for execution gets
+`generate`, and the closing message offers `run` as the next step. Read the mode
+deterministically rather than by impression:
+
+```text
+python3 SKILL_ROOT/scripts/supervise.py mode --request "THE REQUEST, VERBATIM"
+```
+
+It recognizes an explicit `--auto`, `--run` or `--generate` token, which wins over prose,
+and otherwise natural phrasing in any harness ("auto", "run it", "generate and run it",
+"just derive it", "don't run it"). `--implement` and `--smoke` pass through to the
+launcher only when the request asked for them. `--dry-run` is never combined with `run`
+or `auto`: it is the generation gate, not an execution mode.
 
 Every generated artifact belongs under `.mixture-of-loops/` at the repository root: the
 contract at `.mixture-of-loops/<feature>/launch-contract.json`, the launcher beside it,
@@ -88,6 +115,131 @@ an existing root-level launcher, which keeps working unchanged.
 9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`. Dry-run is read-only and
    takes precedence over `--implement` and `--smoke` in every argument order. Run further
    stubbed checks when the generated setup, decision, or recovery logic warrants them.
+   In `generate` this is where the work ends; say so, and offer `run`. In `auto` the
+   generated artifacts are complete at this point: go straight to step 11 with the path
+   you just rendered. Do not revisit steps 1-8, and do not re-check the ignore rule, the
+   contract or the launcher again — the gate in step 11 checks all of it, by name.
+
+## Execution
+
+Only in `run` and `auto`. Every step below is one command and one file to read, so any
+harness can perform it; nothing here depends on a host-specific hook, subagent, scheduler
+or tool name.
+
+10. In `run` only, find the launcher; in `auto` you already have its path. Never
+    generate one silently.
+
+    ```text
+    python3 SKILL_ROOT/scripts/supervise.py resolve \
+      --repo REPOSITORY --feature FEATURE_PATH [--launcher RUN_SCRIPT]
+    ```
+
+    It takes a launcher named in the request, else
+    `.mixture-of-loops/<feature>/run-<feature>.sh`, else the operator-chosen output path,
+    recovered from the generated marker the launcher carries. If none exists, report what
+    is missing and offer `auto`. `run` re-derives nothing: if the sources moved under the
+    launcher, the runtime's own stale check (exit `23`) is the authority; report it and
+    offer `auto`.
+
+11. Know the launch gate. `launch` and `auto` below run it themselves and print every
+    check, so run it separately only to report the checks without launching:
+
+    ```text
+    python3 SKILL_ROOT/scripts/supervise.py gate --launcher RUN_SCRIPT
+    ```
+
+    A launch needs all six: the launcher's `generated-content-sha256` is intact; the
+    bundled contract is `validated` with current sources and no open blocker; the
+    repository root is inside `authorized_roots`; `bash -n` passes; `--dry-run` exits `0`;
+    and no live run owns the run directory. A held lock means "already running — attach
+    and report", never a failure to retry. Whenever the gate stops a launch, deliver the
+    generated artifacts anyway and state the one blocking reason plus the smallest action
+    that would clear it. Never edit a launcher and never pass `--replace-edited` on the
+    user's behalf.
+
+12. Launch and supervise:
+
+    ```text
+    python3 SKILL_ROOT/scripts/supervise.py auto \
+      --launcher RUN_SCRIPT [--implement] [--smoke]
+    ```
+
+    This gates, starts the launcher detached, and reports until the run is terminal. A
+    harness with a scheduling primitive may instead run `launch` once and `observe` at each
+    wake-up; the messages are identical either way, and `observe` prints the delay to wait
+    before the next one. To end a run the user asked to end, use `stop --launcher
+    RUN_SCRIPT`, or the `kill -TERM -<pgid>` the launch message prints.
+
+13. Relay the `[MOL-*]` lines as they are printed, and add nothing to them. Report the
+    terminal digest, and stop.
+
+    Every one of those lines is also appended to `runs/<id>/harness-report.log`. If the
+    harness moves a long-running supervision command to the background, truncates its
+    output, or loses the stream some other way, read that file and relay the lines from
+    there rather than describing the run in your own words.
+
+### Launch discipline
+
+The launcher runs detached so the pipeline outlives the harness turn: stdin closed, a
+session of its own, color forced off, and both streams redirected to
+`runs/<id>/harness-launch.log`, which is separate from the runtime-owned `launcher.log`.
+The command is an argv array; never a `sh -c` string, an `eval`, or a shell-interpolated
+path. Immediately afterwards a harness-owned launch record is written to
+`runs/<id>/harness-run.json`, holding the launcher, the exact argv, the child PID and
+process group, the launch time, the contract digest observed at launch, the mode, and the
+relaunch budget with its remaining count. It is the supervisor's own memory and never
+substitutes for `state.json` when reporting. Nothing generated is written outside
+`.mixture-of-loops/`.
+
+### What the supervisor reads
+
+In this order of authority: `runs/<id>/state.json`; then liveness of the recorded PID,
+which separates "running" from "died without writing a terminal state"; then
+`runs/<id>/launcher.log` for the labelled stream and the final `DIGEST`; then Specstride's
+`run_stop.reason` JSONL under the stage's workdir state dir, the same source the
+launcher's own retry classification binds to; and last `runs/<id>/harness-launch.log`, only
+for a launch that died before the runtime could report. Every file may be absent or behind;
+a missing `state.json` before preflight is normal, and an unparsable one is a reported
+anomaly rather than a crash. The supervisor only reads: it never edits `state.json`, never
+removes a lock, and never deletes a run directory for a cleaner start. Progress comes from
+telemetry alone — never infer a stage, a percentage, or an ETA from the child's prose or
+from your own narration. Loki and OTLP may be reported as configured or observed, never as
+proof that telemetry was delivered.
+
+### What the user is told
+
+- **On launch**: one line naming the launcher, the run directory, the pipeline id, the
+  stage count, the mode and flags in effect, the relaunch budget, and how to stop the run.
+- **While running**: state lines carrying the stage position `k/n` in contract order, the
+  stage id, its elapsed time, the run's total elapsed time, and the latest recovery or
+  block detail when there is one. Nothing else.
+- **Cadence**: no tighter than one poll per minute, backing off as a stage runs long and
+  returning to the base interval at a stage boundary or after a `RECOVER`. Consecutive
+  unchanged observations are one quiet hold, not the state repeated.
+- **On terminal state**: one digest mirroring the launcher's own `DIGEST` line — state,
+  launcher exit, child exit, last stage, evidence and state paths — plus the next
+  automated or operator action. `completed`, `failed`, `stopped` and unknown-terminal each
+  read differently; never flatten them into "done", and never claim completion without both
+  a terminal `state.json` and an exited process.
+
+### Relaunching
+
+Re-invoke the launcher only when the run's own records classify the stop as transient: the
+launcher exited `22`, `state.json` reads `failed`, the failed stage's `child_exit_code` is
+in that stage's `recovery.retry_exit_codes`, the newest `run_stop.reason` is in
+`recovery.reason.allowed` where the stage declares one, the stage's recorded reason is a
+transient outcome and not `postcondition`, `stage-precondition`, `setup-required` or
+`interrupted`, the contract digest still matches the one recorded at launch, and the budget
+has room. Resume is re-invocation: the runtime reconciles against its own `state.json`.
+
+Never relaunch on an invalid or stale contract, a preflight block, a lock conflict, a
+deliberate stop (a signal, or child exit `6`), a postcondition failure, a missing authority
+or open blocker, an unknown-terminal condition, or an exhausted budget. Report and stop.
+Every relaunch is announced before it happens, with its reason and the remaining budget,
+and each is recorded in `harness-run.json`. A stop the user asked for is reported as
+intentional and is never relaunched. The budget is declared, not improvised: it comes from
+`configuration.auto`, or from the conservative default derived from the stages' own
+declared timeouts and attempts.
 
 ## Required runtime behavior
 
@@ -109,6 +261,10 @@ an existing root-level launcher, which keeps working unchanged.
 - Print a final digest on completion, failure, stop, and interruption with the last stage,
   child result, evidence/state paths, and next automated or operator action.
 
-The generated launcher is a control layer around Specstride, not a second gate authority.
-Specstride remains responsible for proposer/critic separation, phase gates, evidence, and its
-feature state.
+The generated launcher is a control layer around Specstride, not a second gate authority,
+and supervising it is not one either. Specstride remains responsible for proposer/critic
+separation, phase gates, evidence, and its feature state. The supervisor decides only when
+to launch, what the run's own telemetry says, and whether a declared, classified transient
+may be relaunched within a declared budget. It never decides that a gate passed, and it
+never fabricates a signature, identity, approval, budget, tolerance, or deployment
+authority to keep a run going.

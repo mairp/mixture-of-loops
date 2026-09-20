@@ -25,6 +25,7 @@ SKILL = ROOT / "skills" / "mixture-of-loops"
 SCRIPTS = SKILL / "scripts"
 FIXTURES = ROOT / "tests" / "fixtures"
 STUB_BIN = Path(__file__).resolve().parent / "stub-bin"
+EXEC_STUB_BIN = Path(__file__).resolve().parent / "exec-stub-bin"
 NAME = "mixture-of-loops"
 SCRIPT_NAMES = ("bootstrap_contract.py", "validate_contract.py", "render_launcher.py")
 GENERATED_MARKER = "# mixture-of-loops-generated:"
@@ -331,9 +332,13 @@ def _mentioned(transcript: Transcript, script: str, extract) -> list[str]:
 
 
 def _generated_or_state(path: Path, repo: Path) -> bool:
-    """Renderer bundles and runtime state under .mixture-of-loops/ are copies, not the contract."""
+    """Renderer bundles and runtime state under .mixture-of-loops/ are copies, not the
+    contract. A launcher at SKILL.md's default path, .mixture-of-loops/<feature>/, keeps
+    its own artifact root one level deeper, so the marker is looked for at any depth."""
     parts = path.relative_to(repo).parts
-    return len(parts) > 1 and parts[0] == ".mixture-of-loops" and parts[1] in ("generated", "runs")
+    return any(name == ".mixture-of-loops" and index + 1 < len(parts)
+               and parts[index + 1] in ("generated", "runs")
+               for index, name in enumerate(parts))
 
 
 def locate_contract(repo: Path, transcript: Transcript) -> Path | None:
@@ -353,7 +358,11 @@ def locate_contract(repo: Path, transcript: Transcript) -> Path | None:
 def locate_launchers(repo: Path) -> list[Path]:
     launchers = []
     for path in repo.rglob("*"):
-        if ".git" in path.parts or ".mixture-of-loops" in path.parts or not path.is_file():
+        if ".git" in path.parts or not path.is_file():
+            continue
+        # SKILL.md's default output path is .mixture-of-loops/<feature>/run-<feature>.sh,
+        # so only the renderer's bundles and the runtime's run state are excluded here.
+        if _generated_or_state(path, repo):
             continue
         try:
             head = path.read_bytes()[:300].decode("utf-8", "replace")
@@ -435,6 +444,8 @@ class RunContext:
     home_changes: list[str] | None = None        # None: not checked
     checkout_changed: list[str] | None = None    # None: not checked
     harness_stub_calls: list[dict] = field(default_factory=list)
+    execution_stub_calls: list[dict] = field(default_factory=list)
+    expect_execution: bool = False                # the run was asked to execute the pipeline
     work: Path | None = None                      # scratch for the dry-run stub log
     grader_paths: list[str] = field(default_factory=list)   # a tool call mentioning one is contamination
 
@@ -606,7 +617,11 @@ def evaluate(context: RunContext) -> list[dict]:
                                f"tool calls touching the test harness or expectations: {touched[:3]}"))
     refused = [c for c in context.harness_stub_calls if c.get("argv") not in (["--version"], ["-V"])
                and not (c.get("argv") and c["argv"][-1] in ("--help", "-h"))]
-    results.append(verdict("no-pipeline-started", not refused, f"stub specstride calls during the run: {refused[:3]}"))
+    if context.expect_execution:
+        results.extend(check_execution(context))
+    else:
+        results.append(verdict("no-pipeline-started", not refused,
+                               f"stub specstride calls during the run: {refused[:3]}"))
     if context.home_changes is not None:
         results.append(verdict("real-homes-unchanged", not context.home_changes, "; ".join(context.home_changes[:5])))
     if context.checkout_changed is not None:
@@ -638,6 +653,133 @@ def check_launcher(repo: Path, work: Path | None, stub_bin: Path = STUB_BIN) -> 
                            f"exit {dry.returncode}: {(dry.stdout + dry.stderr).strip()[-300:]}"))
     results.append(verdict("dry-run-read-only", not added and not changed and not stub_calls,
                            f"added={added[:5]} changed={changed[:5]} stub calls={stub_calls[:3]}"))
+    return results
+
+
+TERMINAL_RUN_STATES = ("completed", "failed", "stopped")
+# A supervisor line, wherever it sits on the line: a harness that hands back a file's
+# contents may prefix each one with its line number. What identifies it is the [MOL-…]
+# token and the field format that follows, which model prose does not produce.
+MOL_LINE = re.compile(r"\[MOL-[A-Z]+\][^\n]*")
+LAUNCHER_DIGEST = re.compile(r"^\[DIGEST\] state=(\S+) exit=(-?\d+) last-stage=(\S+)", re.MULTILINE)
+
+
+def run_directories(repo: Path) -> list[Path]:
+    """The run state the runtime owns, one directory per pipeline id, wherever the
+    launcher's own artifact root put it."""
+    found = set()
+    for name in ("state.json", "harness-run.json"):
+        for path in repo.rglob(name):
+            parts = path.relative_to(repo).parts
+            if len(parts) >= 4 and parts[-3] == "runs" and ".mixture-of-loops" in parts:
+                found.add(path.parent)
+    return sorted(found)
+
+
+def lock_is_free(path: Path) -> bool:
+    if not path.is_file():
+        return True
+    import fcntl
+    try:
+        handle = path.open("a+")
+    except OSError:
+        return True
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+    finally:
+        handle.close()
+
+
+def _alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    return not cmdline.is_file() or bool(cmdline.read_bytes().strip(b"\0"))
+
+
+def tool_output(transcript: Transcript) -> str:
+    """Everything the harness's own tool results carried. Structured events, not prose."""
+    return "\n".join(call.result for call in transcript.calls if call.result)
+
+
+def check_execution(context: RunContext) -> list[dict]:
+    """A run that was asked to execute: what the pipeline left behind, and what the
+    harness reported from it. Verdicts come from the run's files and the harness's
+    tool results, never from the model's narration."""
+    results = []
+    directories = run_directories(context.repo)
+    results.append(verdict("run-directory", bool(directories),
+                           str([str(path) for path in directories])))
+    reported = MOL_LINE.findall(tool_output(context.transcript))
+    started = [c for c in context.execution_stub_calls
+               if c.get("argv") not in (["--version"], ["-V"])]
+    results.append(verdict("pipeline-started", bool(started),
+                           f"{len(started)} stub specstride invocation(s)"))
+    if not directories:
+        results.append(verdict("terminal-digest-reported", False, "no run directory to report on"))
+        return results
+
+    run_dir = directories[-1]
+    try:
+        record = json.loads((run_dir / "harness-run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    required = ("launcher", "argv", "pid", "pgid", "launched_at", "contract_digest",
+                "mode", "relaunch_budget", "run_dir")
+    missing = [key for key in required if not isinstance(record, dict) or key not in record]
+    results.append(verdict("harness-launch-record", isinstance(record, dict) and not missing,
+                           f"{run_dir / 'harness-run.json'}: missing {missing}"))
+
+    try:
+        state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        state = {}
+        results.append(verdict("run-state-readable", False, str(exc)))
+    results.append(verdict("run-reached-a-terminal-state",
+                           state.get("state") in TERMINAL_RUN_STATES,
+                           f"state={state.get('state')!r} exit_reason={state.get('exit_reason')!r}"))
+    results.append(verdict("run-completed", state.get("state") == "completed",
+                           f"stages={ {k: v.get('status') for k, v in (state.get('stages') or {}).items()} }"))
+
+    launcher_log = run_dir / "launcher.log"
+    own = LAUNCHER_DIGEST.findall(launcher_log.read_text(encoding="utf-8", errors="replace")) \
+        if launcher_log.is_file() else []
+    results.append(verdict("launcher-printed-a-digest", bool(own), str(own[-1:])))
+    escaped = [name for name in ("launcher.log", "harness-launch.log")
+               if (run_dir / name).is_file() and b"\x1b[" in (run_dir / name).read_bytes()]
+    results.append(verdict("run-logs-are-escape-free", not escaped, str(escaped)))
+
+    # An intermediate reading is one taken while the run was still live: `starting`
+    # before the runtime wrote its first state, `running` after. Either proves the
+    # harness read the run rather than waited for it to be over.
+    running = [line for line in reported if line.startswith("[MOL-STATE]")
+               and ("state=running" in line or "state=starting" in line)]
+    results.append(verdict("intermediate-state-reported", bool(running), str(running[:2])))
+    digests = [line for line in reported if line.startswith("[MOL-DIGEST]")]
+    results.append(verdict("terminal-digest-reported",
+                           any(f"state={state.get('state')}" in line for line in digests),
+                           str(digests[-1:])))
+    if own and digests:
+        expected = f"state={own[-1][0]} exit={own[-1][1]}"
+        results.append(verdict("reported-digest-matches-the-launcher",
+                               any(expected in line for line in digests),
+                               f"launcher said {expected!r}; harness reported {digests[-1:]}"))
+    relaunches = (record or {}).get("relaunches") or []
+    announced = [line for line in reported if line.startswith("[MOL-RELAUNCH]")]
+    results.append(verdict("every-relaunch-was-announced", len(announced) >= len(relaunches),
+                           f"{len(relaunches)} recorded, {len(announced)} announced"))
+    results.append(verdict("no-leftover-run-lock", lock_is_free(run_dir / "lock"),
+                           str(run_dir / "lock")))
+    results.append(verdict("no-leftover-launcher-process",
+                           not _alive((record or {}).get("pid")),
+                           f"pid={(record or {}).get('pid')}"))
     return results
 
 

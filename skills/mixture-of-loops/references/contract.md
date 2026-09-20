@@ -97,6 +97,35 @@ Recovery defaults to one attempt. More attempts require explicit retry exit code
 ambiguous Specstride outcomes, include a correlated JSONL reason constraint. A retry uses
 `resume` after the first action when supplied.
 
+## Supervision budget
+
+`configuration.auto` is optional. It declares how a supervising harness may treat a run of
+this pipeline, and nothing else in the contract depends on it. A contract without it keeps
+validating and running exactly as before.
+
+```json
+{
+  "configuration": {
+    "auto": {
+      "max_relaunches": 2,
+      "wall_clock_seconds": 3600
+    }
+  }
+}
+```
+
+- `max_relaunches`: how many times the harness may re-invoke the launcher after a
+  classified transient stage failure. An integer from `0` to `5`; `0` forbids relaunching.
+- `wall_clock_seconds`: the ceiling on the whole supervised session, measured from the
+  first launch. It may not exceed what the stages themselves declare for
+  `max_relaunches + 1` launcher attempts, which is the sum over stages of
+  `recovery.max_attempts x action.timeout_seconds` plus every declared backoff.
+  `validate_contract.py` rejects a larger value and names the bound it exceeded.
+
+Absent, the conservative default applies: at most two relaunches, and a ceiling of the wall
+clock those three attempts declare. The budget is derived from the contract, never chosen
+by the model at run time.
+
 ## Generated bundle
 
 `render_launcher.py` publishes a content-addressed bundle below
@@ -115,7 +144,26 @@ At execution time the runtime stores plain logs and JSON state below
 pipeline lock, validates completed-stage postconditions, and resumes from the first stage
 whose postconditions no longer hold. State is bound to a semantic contract digest; task
 checkbox progress is normalized, while a changed requirement, stage, policy, or source
-binding starts a fresh stage record.
+binding starts a fresh stage record. A supervisor that relaunches across such a change
+would restart the pipeline without saying so, which is why it compares the digest in
+`state.json` with the one it recorded at launch and stops instead.
+
+A supervising harness adds two files of its own to the same directory and reads everything
+else there without writing to it:
+
+- `harness-run.json`: the launcher path, the exact argv, the child PID and process-group
+  id, the launch time, the contract digest observed at launch, the mode and flags, the
+  byte offset into `launcher.log` at which this run's lines begin, and the relaunch budget
+  with its remaining count and each relaunch's justification. It is the supervisor's own
+  memory and never substitutes for `state.json` when reporting.
+- `harness-launch.log`: the detached launcher's stdout and stderr, separate from the
+  runtime-owned `launcher.log`. It is where a launch that died before the runtime could
+  report leaves its evidence, and where the `[STALE]` and `[INVALID]` paths print, since
+  those precede the launcher log.
+- `harness-report.log`: every `[MOL-*]` line the supervisor printed, appended as it was
+  printed and free of escape sequences. A harness that backgrounds a long-running
+  supervision command, or truncates its output, can recover the same messages from here
+  instead of from whatever file it happened to redirect to.
 
 Color precedence is `--no-color`, an explicit `--color`, a present `NO_COLOR`, then
 automatic TTY detection. In `always` mode with redirected output, the runtime gives a Specstride stage a

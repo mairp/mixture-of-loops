@@ -37,6 +37,14 @@ CHECKS = {
     "json_field_equals",
 }
 DISPOSITIONS = {"mapped", "optional", "out-of-scope", "unresolved", "unsupported"}
+# The optional harness-side `configuration.auto` budget: how often a supervising harness
+# may relaunch the launcher after a classified transient stage failure, and the wall clock
+# that supervision may span. Both are bounded by what the stages themselves declare, so a
+# budget is derived from the contract rather than chosen freely.
+DEFAULT_MAX_RELAUNCHES = 2
+MAX_RELAUNCHES = 5
+DEFAULT_TIMEOUT_SECONDS = 3600
+AUTO_KEYS = {"max_relaunches", "wall_clock_seconds"}
 SENSITIVE_ENV = re.compile(r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:$|_)", re.I)
 
 
@@ -176,6 +184,85 @@ def check_source_hashes(contract: dict) -> list[str]:
                     continue
             stale.append(f"sources[{index}] hash changed: {path}")
     return stale
+
+
+def declared_stage_seconds(stage: dict) -> float:
+    """The wall clock one stage can occupy at most, read from its own declarations:
+    every attempt running to its timeout, plus every declared backoff."""
+    action = stage.get("action")
+    per_attempt = action.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS) if isinstance(action, dict) else None
+    if not isinstance(per_attempt, (int, float)) or isinstance(per_attempt, bool) or per_attempt <= 0:
+        per_attempt = DEFAULT_TIMEOUT_SECONDS
+    recovery = stage.get("recovery")
+    recovery = recovery if isinstance(recovery, dict) else {}
+    attempts = recovery.get("max_attempts", 1)
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
+        attempts = 1
+    backoff = recovery.get("backoff_seconds", [])
+    delay = sum(value for value in backoff
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0) \
+        if isinstance(backoff, list) else 0
+    return attempts * float(per_attempt) + float(delay)
+
+
+def declared_pipeline_seconds(contract: dict) -> float:
+    """The wall clock the whole stage list declares for one launcher invocation."""
+    stages = contract.get("stages")
+    if not isinstance(stages, list):
+        return 0.0
+    return sum(declared_stage_seconds(stage) for stage in stages if isinstance(stage, dict))
+
+
+def auto_budget(contract: dict) -> dict:
+    """The relaunch budget in force for this contract.
+
+    A declared `configuration.auto` block supplies it; otherwise the conservative default
+    applies, derived from the same declared bounds: at most DEFAULT_MAX_RELAUNCHES
+    relaunches, and a ceiling of the wall clock those attempts of the pipeline declare.
+    """
+    configuration = contract.get("configuration")
+    block = configuration.get("auto") if isinstance(configuration, dict) else None
+    block = block if isinstance(block, dict) else None
+    pipeline = declared_pipeline_seconds(contract)
+    relaunches = block.get("max_relaunches", DEFAULT_MAX_RELAUNCHES) if block else DEFAULT_MAX_RELAUNCHES
+    if not isinstance(relaunches, int) or isinstance(relaunches, bool) or relaunches < 0:
+        relaunches = DEFAULT_MAX_RELAUNCHES
+    ceiling = block.get("wall_clock_seconds") if block else None
+    if not isinstance(ceiling, (int, float)) or isinstance(ceiling, bool) or ceiling <= 0:
+        ceiling = (relaunches + 1) * pipeline
+    return {
+        "max_relaunches": relaunches,
+        "wall_clock_seconds": float(ceiling),
+        "declared_pipeline_seconds": pipeline,
+        "source": "declared" if block is not None else "default",
+    }
+
+
+def _validate_auto(configuration: object, contract: dict, errors: list[str]) -> None:
+    if not isinstance(configuration, dict) or "auto" not in configuration:
+        return
+    block = configuration["auto"]
+    label = "configuration.auto"
+    _require(isinstance(block, dict), f"{label} must be an object", errors)
+    if not isinstance(block, dict):
+        return
+    unknown = sorted(set(block) - AUTO_KEYS)
+    _require(not unknown, f"{label} has unsupported keys: {', '.join(unknown)}", errors)
+    relaunches = block.get("max_relaunches", DEFAULT_MAX_RELAUNCHES)
+    valid_count = isinstance(relaunches, int) and not isinstance(relaunches, bool) \
+        and 0 <= relaunches <= MAX_RELAUNCHES
+    _require(valid_count,
+             f"{label}.max_relaunches must be an integer in 0..{MAX_RELAUNCHES}", errors)
+    if "wall_clock_seconds" not in block:
+        return
+    ceiling = block["wall_clock_seconds"]
+    valid_ceiling = isinstance(ceiling, (int, float)) and not isinstance(ceiling, bool) and ceiling > 0
+    _require(valid_ceiling, f"{label}.wall_clock_seconds must be a positive number", errors)
+    if valid_count and valid_ceiling:
+        limit = (relaunches + 1) * declared_pipeline_seconds(contract)
+        _require(ceiling <= limit,
+                 f"{label}.wall_clock_seconds is {ceiling:g}, above the {limit:g}s the stages "
+                 f"declare for {relaunches + 1} launcher attempt(s)", errors)
 
 
 def artifact_root(launcher_dir: Path) -> Path:
@@ -469,6 +556,11 @@ def validate_contract(
             _require(isinstance(entry.get("rationale"), str) and bool(entry.get("rationale")),
                      f"{label}.rationale is required", errors)
             _require(isinstance(entry.get("evidence"), list), f"{label}.evidence must be an array", errors)
+
+    configuration = contract.get("configuration")
+    _require(configuration is None or isinstance(configuration, dict),
+             "configuration must be an object", errors)
+    _validate_auto(configuration, contract, errors)
 
     findings = contract.get("findings")
     _require(isinstance(findings, list), "findings must be an array", errors)

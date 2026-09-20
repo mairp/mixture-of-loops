@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Stub `specstride` that acts like a pipeline, for the Tier 2 execution tests only.
+
+The dry-run stub in ../stub-bin refuses everything but --version/--help on purpose, so
+a dry run provably runs nothing; it must stay that way. This one is its opposite and is
+never on PATH for a dry-run test: it writes the state a real run would write and ends
+the way MOL_EXEC_STUB_MODE tells it to.
+
+    MOL_EXEC_STUB_MODE       succeed | transient | fail | stop | sleep  (default succeed)
+    MOL_EXEC_STUB_FAIL_TIMES transient: how many invocations fail before one succeeds (2)
+    MOL_EXEC_STUB_EXIT       fail: the exit code to end with (3)
+    MOL_EXEC_STUB_REASON     fail: the run_stop.reason to record (postcondition_failed)
+    MOL_EXEC_STUB_SLEEP      sleep: seconds to stay running before succeeding (30)
+    MOL_EXEC_STUB_FEATURE    the feature slug under .specstride/features/ (001-greeting)
+    MOL_EXEC_STUB_LOG        a JSONL file each invocation is appended to
+
+`transient` fails with exit 4 and records run_stop.reason=wall_budget, which is what a
+contract declares as retryable; `fail` records a reason no contract allows. The
+invocation counter lives in the feature's state directory, so it survives both the
+launcher's own retries and a supervisor relaunch.
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+args = sys.argv[1:]
+if args in (["--version"], ["-V"]):
+    print("specstride 0.0.0-exec-stub")
+    raise SystemExit(0)
+if args and args[-1] in ("--help", "-h"):
+    print("usage: specstride (execution stub) — driven by MOL_EXEC_STUB_MODE")
+    raise SystemExit(0)
+
+mode = os.environ.get("MOL_EXEC_STUB_MODE", "succeed")
+feature = os.environ.get("MOL_EXEC_STUB_FEATURE", "001-greeting")
+state = Path(".specstride") / "features" / feature
+state.mkdir(parents=True, exist_ok=True)
+events = state / "events.jsonl"
+counter = state / "attempts"
+
+attempt = (int(counter.read_text(encoding="utf-8").strip() or 0) if counter.is_file() else 0) + 1
+counter.write_text(str(attempt), encoding="utf-8")
+
+log = os.environ.get("MOL_EXEC_STUB_LOG")
+if log and Path(log).parent.is_dir():
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"argv": args, "cwd": os.getcwd(), "mode": mode,
+                                 "attempt": attempt, "pid": os.getpid()}) + "\n")
+
+
+def record(reason: str) -> None:
+    with events.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event": "run_stop", "reason": reason,
+                                 "feature": feature, "attempt": attempt}) + "\n")
+
+
+def succeed() -> None:
+    (state / "PROGRESS.md").write_text(
+        f"# {feature}\n\nAll phases complete on attempt {attempt}.\n", encoding="utf-8")
+    print(f"stub specstride: {feature} complete (attempt {attempt})")
+    record("completed")
+    raise SystemExit(0)
+
+
+if mode == "succeed":
+    succeed()
+
+if mode == "transient":
+    if attempt <= int(os.environ.get("MOL_EXEC_STUB_FAIL_TIMES", "2")):
+        print(f"stub specstride: wall budget reached on attempt {attempt}", file=sys.stderr)
+        record("wall_budget")
+        raise SystemExit(4)
+    succeed()
+
+if mode == "fail":
+    reason = os.environ.get("MOL_EXEC_STUB_REASON", "postcondition_failed")
+    print(f"stub specstride: stopping, reason={reason}", file=sys.stderr)
+    record(reason)
+    raise SystemExit(int(os.environ.get("MOL_EXEC_STUB_EXIT", "3")))
+
+if mode == "stop":
+    print("stub specstride: intentional stop", file=sys.stderr)
+    record("user_stop")
+    raise SystemExit(6)
+
+if mode == "sleep":
+    # Stay running so a supervisor can observe a live run and a SIGTERM can land on it.
+    # A signal is an intentional stop: the run ends without writing the success state.
+    def stopped(signum, _frame):
+        record("user_stop")
+        print(f"stub specstride: stopped by signal {signum}", file=sys.stderr)
+        raise SystemExit(128 + signum)
+
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, stopped)
+    (state / "started").write_text(str(os.getpid()), encoding="utf-8")
+    print(f"stub specstride: running (attempt {attempt})", flush=True)
+    time.sleep(float(os.environ.get("MOL_EXEC_STUB_SLEEP", "30")))
+    succeed()
+
+print(f"stub specstride: unknown MOL_EXEC_STUB_MODE={mode!r}", file=sys.stderr)
+raise SystemExit(98)

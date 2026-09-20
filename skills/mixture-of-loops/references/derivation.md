@@ -94,6 +94,24 @@ raw output in its own `run.log`. In detached execution, use the durable event st
 attach with `specstride watch`, `specstride events -f`, or `specstride tail` for the selected workdir
 and feature.
 
+## Supervision budget
+
+`configuration.auto` is derived, not chosen. Read the bound off the stages that are already
+written: one launcher attempt can take at most
+`sum(recovery.max_attempts x action.timeout_seconds + sum(backoff_seconds))` over the
+stages, and `max_relaunches + 1` attempts can take at most that many times as long. Declare
+`wall_clock_seconds` at or below that figure and `max_relaunches` at or below the number of
+relaunches the pipeline's own recovery bounds make meaningful; validation rejects anything
+larger. Omit the block entirely unless the request or the sources justify departing from
+the default of two relaunches, and never widen a budget to make a failing pipeline finish:
+an exhausted budget is a result to report, not an obstacle to raise.
+
+A relaunch is not a substitute for a stage's own `recovery`. In-stage retries handle a
+transient inside one attempt; the budget handles a launcher that exhausted them and exited
+`22`, and the runtime resumes from the first stage whose postconditions no longer hold. If
+a stage has no declared transient class, it has nothing for a supervisor to relaunch on
+either, and that is the correct outcome rather than a gap to fill.
+
 ## Readiness review
 
 Before setting `status` to `validated`, confirm:
