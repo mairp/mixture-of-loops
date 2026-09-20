@@ -33,9 +33,22 @@ jobs:
         run: shellcheck --version || (sudo apt-get update && sudo apt-get install -y shellcheck)
 
       - name: Syntax-check every script
+        # Parse only. compileall would write __pycache__ into the fixture
+        # repositories under tests/fixtures/repos, and those two trees are
+        # asserted to be byte-identical apart from the approval file.
         run: |
           bash -n bin/onboard-skill
-          python3 -m compileall -q skills tests
+          python3 - <<'PY'
+          import ast, pathlib, sys
+          failed = False
+          for path in sorted(pathlib.Path(".").rglob("*.py")):
+              try:
+                  ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              except SyntaxError as error:
+                  print(f"{path}: {error}")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
 
       - name: Run the hermetic suite (Tiers 1 and 2)
         # Tier 2 skips itself when pi or prime-agent is absent; Tier 3 stays
