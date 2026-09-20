@@ -53,7 +53,20 @@
       }
     },
     "inventory": {"type": "object"},
-    "configuration": {"type": "object"},
+    "configuration": {
+      "type": "object",
+      "properties": {
+        "auto": {
+          "$comment": "Optional harness-side supervision budget. Absent means the conservative default: at most 2 relaunches, and a wall clock of the time those launcher attempts declare. validate_contract.py rejects a budget above what the stages declare.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_relaunches": {"type": "integer", "minimum": 0, "maximum": 5},
+            "wall_clock_seconds": {"type": "number", "exclusiveMinimum": 0}
+          }
+        }
+      }
+    },
     "coverage": {
       "type": "array",
       "items": {

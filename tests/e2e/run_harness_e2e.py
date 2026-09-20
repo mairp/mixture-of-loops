@@ -62,7 +62,19 @@ PROMPTS = {
     "explicit": "{invocation} derive a pipeline for specs/001-greeting",
     "implicit": ("Derive an unattended Specstride pipeline for the Spec Kit feature in specs/001-greeting: "
                  "write its launch contract and the run script."),
+    # The model must read this as `auto`: generate, clear the gate, launch detached, and
+    # report the run from its own telemetry until it terminates.
+    "auto": "{invocation} derive a pipeline for specs/001-greeting and run it",
 }
+# A run that is asked to execute gets the pipeline-acting stub instead of the refusing
+# one, in sleep mode so an intermediate running state is there to be observed.
+EXECUTION_STUB_ENV = {"MOL_EXEC_STUB_MODE": "sleep", "MOL_EXEC_STUB_SLEEP": "5",
+                      "MOL_EXEC_STUB_FEATURE": "001-greeting"}
+# `auto` does strictly more than deriving: it also runs the pipeline and supervises it to
+# a terminal state, which costs at least one poll interval on top. A local model that
+# derives in ~18 minutes has nothing left of a 20-minute budget, so auto gets its own.
+DEFAULT_TIMEOUT = 1200
+AUTO_TIMEOUT = 1800
 FIXTURE_ALIASES = {"blocked": "greeting-blocked", "ready": "greeting-ready"}
 KERNEL_PYTHON = Path("/root/.prime/agent/kernel-venv/bin/python")
 PRIME_VARIANTS = Path("/root/prime-agent/variants.tsv")
@@ -89,7 +101,7 @@ def command_version(argv: list[str]) -> str | None:
     return (result.stdout or result.stderr).strip().splitlines()[0] if result.returncode == 0 else None
 
 
-def pristine_checkout(run: Path) -> Path:
+def pristine_checkout(run: Path, *, execution: bool = False) -> Path:
     """A copy of bin/ and skills/ only, plus the stub, inside the run's temporary root.
 
     Onboarding from it keeps the one canonical package (byte-identical, verified) while
@@ -100,7 +112,7 @@ def pristine_checkout(run: Path) -> Path:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     shutil.copytree(ROOT / "bin", checkout / "bin", ignore=ignore)
     shutil.copytree(mol_e2e.SKILL, checkout / "skills" / mol_e2e.NAME, ignore=ignore)
-    shutil.copytree(mol_e2e.STUB_BIN, run / "stub-bin")
+    shutil.copytree(mol_e2e.EXEC_STUB_BIN if execution else mol_e2e.STUB_BIN, run / "stub-bin")
     canonical = {k: v for k, v in mol_e2e.tree_state(mol_e2e.SKILL).items() if "__pycache__" not in k}
     if mol_e2e.tree_state(checkout / "skills" / mol_e2e.NAME) != canonical:
         raise RuntimeError("the pristine copy differs from the canonical package")
@@ -406,14 +418,17 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
                      "version": harness.version(), "transcript": str(run / "transcript.jsonl"),
                      "stderr": str(run / "stderr.log"), "repo": str(repo)}
     checkout_before = checkout_state()
-    pristine_checkout(run)
+    pristine_checkout(run, execution=mode == "auto")
     prompt = PROMPTS[mode].format(invocation=EXPLICIT[harness.name])
     prepared = harness.prepare(run, repo, prompt, token)
     check_allowlist(harness.name, prepared.argv, prepared.environment)
     summary.update(model=prepared.model, argv=prepared.argv[:-1] + ["<prompt>"], prompt=prompt,
                    onboarding=prepared.onboarding)
     stub_log = run / "harness-stub-specstride.jsonl"
+    exec_stub_log = run / "harness-exec-stub-specstride.jsonl"
     environment = {**prepared.environment, "MOL_STUB_LOG": str(stub_log)}
+    if mode == "auto":
+        environment.update(EXECUTION_STUB_ENV, MOL_EXEC_STUB_LOG=str(exec_stub_log))
     timed_out, exit_code = False, None
     started = time.monotonic()
     reaped: list = []
@@ -448,6 +463,9 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
     transcript = mol_e2e.PARSERS[harness.name]((run / "transcript.jsonl").read_text(encoding="utf-8").splitlines())
     stub_calls = [json.loads(line) for line in stub_log.read_text(encoding="utf-8").splitlines()] \
         if stub_log.exists() else []
+    exec_stub_calls = [json.loads(line) for line in
+                       exec_stub_log.read_text(encoding="utf-8").splitlines()] \
+        if exec_stub_log.exists() else []
     home_changes = home_snapshot.diff(snapshot_before, home_snapshot.take())
     checkout_after = checkout_state()
     checkout_changed = [f"{k}: {checkout_before.get(k)} -> {checkout_after.get(k)}"
@@ -456,7 +474,9 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
     context = mol_e2e.RunContext(harness=harness.name, mode=mode, fixture=fixture, repo=repo,
                                  transcript=transcript, timed_out=timed_out, exit_code=exit_code,
                                  home_changes=home_changes, checkout_changed=checkout_changed,
-                                 harness_stub_calls=stub_calls, work=run,
+                                 harness_stub_calls=stub_calls,
+                                 execution_stub_calls=exec_stub_calls,
+                                 expect_execution=mode == "auto", work=run,
                                  grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
                                                "mol_e2e", "expectations/greeting", "reference_contract",
                                                "summary.json", "report.json", "home-snapshot",
@@ -618,9 +638,13 @@ def reevaluate(evidence: Path) -> int:
         stub_log = run / "harness-stub-specstride.jsonl"
         stub_calls = [json.loads(line) for line in stub_log.read_text(encoding="utf-8").splitlines()] \
             if stub_log.exists() else []
+        exec_log = run / "harness-exec-stub-specstride.jsonl"
+        exec_calls = [json.loads(line) for line in exec_log.read_text(encoding="utf-8").splitlines()] \
+            if exec_log.exists() else []
         context = mol_e2e.RunContext(harness=old["harness"], mode=old["mode"], fixture=old["fixture"], repo=run / "repo",
                                      transcript=transcript, timed_out=old["timed_out"], exit_code=old["exit_code"],
-                                     harness_stub_calls=stub_calls, work=run,
+                                     harness_stub_calls=stub_calls, execution_stub_calls=exec_calls,
+                                     expect_execution=old["mode"] == "auto", work=run,
                                      grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
                                                    "mol_e2e", "expectations/greeting", "reference_contract",
                                                    "summary.json", "report.json", "home-snapshot",
@@ -642,9 +666,13 @@ def reevaluate(evidence: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--harness", default="all", help="pi|prime|codex|claude|dsh|all, or a comma list")
-    parser.add_argument("--mode", default="both", choices=("explicit", "implicit", "both"))
+    parser.add_argument("--mode", default="both",
+                        choices=("explicit", "implicit", "auto", "both", "all"),
+                        help="both: explicit and implicit generation; all: those plus auto")
     parser.add_argument("--fixture", default="all", choices=("blocked", "ready", "all"))
-    parser.add_argument("--timeout", type=int, default=1200, help="wall-clock seconds per harness run")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help=f"wall-clock seconds per harness run (default: {DEFAULT_TIMEOUT}, "
+                             f"or {AUTO_TIMEOUT} in auto mode)")
     parser.add_argument("--evidence-dir", help="default: a new temporary directory (never inside the repository)")
     parser.add_argument("--skip-tiers", action="store_true", help="do not run Tiers 1 and 2 first")
     parser.add_argument("--reevaluate", metavar="EVIDENCE_DIR",
@@ -658,7 +686,8 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [n for n in names if n not in HARNESSES]
     if unknown:
         parser.error(f"unknown harness: {', '.join(unknown)}")
-    modes = ("explicit", "implicit") if args.mode == "both" else (args.mode,)
+    modes = {"both": ("explicit", "implicit"),
+             "all": ("explicit", "implicit", "auto")}.get(args.mode, (args.mode,))
     fixtures = mol_e2e.FIXTURE_NAMES if args.fixture == "all" else (FIXTURE_ALIASES[args.fixture],)
     evidence = Path(args.evidence_dir).resolve() if args.evidence_dir else Path(tempfile.mkdtemp(prefix="mol-e2e-evidence-"))
     if evidence == ROOT or ROOT in evidence.parents:
@@ -689,9 +718,10 @@ def main(argv: list[str] | None = None) -> int:
                     if reason:
                         report["runs"].append({**base, "status": "skip", "reason": reason})
                         continue
-                    print(f"running {base['run']} (timeout {args.timeout}s) ...", file=sys.stderr, flush=True)
+                    timeout = args.timeout or (AUTO_TIMEOUT if mode == "auto" else DEFAULT_TIMEOUT)
+                    print(f"running {base['run']} (timeout {timeout}s) ...", file=sys.stderr, flush=True)
                     try:
-                        report["runs"].append(run_one(harness, mode, fixture, evidence, args.timeout, snapshot))
+                        report["runs"].append(run_one(harness, mode, fixture, evidence, timeout, snapshot))
                     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                         report["runs"].append({**base, "status": "fail", "reason": f"runner error: {exc}",
                                                "verdicts": [mol_e2e.verdict("runner", False, str(exc))]})

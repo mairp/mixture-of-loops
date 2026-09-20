@@ -54,8 +54,10 @@ jobs:
           PY
 
       - name: Run the hermetic suite (Tiers 1 and 2)
-        # Tier 2 skips itself when pi or prime-agent is absent; Tier 3 stays
-        # opt-in behind MOL_LIVE_E2E, so this run never calls a model.
+        # Tier 2 discovery skips itself when pi or prime-agent is absent; the
+        # Tier 2 execution tests need no harness binary and always run, against
+        # the stub Specstride in tests/e2e/exec-stub-bin. Tier 3 stays opt-in
+        # behind MOL_LIVE_E2E, so this run never calls a model.
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 -m unittest discover -s tests -v

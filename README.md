@@ -33,8 +33,35 @@ description-based invocation (Codex, Claude Code, pi, prime); see the tested res
 for how reliably a local model does this.
 
 The skill inventories the supplied feature artifacts, records their provenance in a launch
-contract, validates the contract, and renders a Bash launcher. Generation does not execute
-the pipeline unless the request separately asks for execution.
+contract, validates the contract, and renders a Bash launcher.
+
+### Three modes
+
+Generation is the default, and silence is never consent to execute:
+
+```text
+# generate (default): derive, validate, render, bash -n, --dry-run. Nothing runs.
+/mixture-of-loops derive a pipeline for specs/007-example
+
+# run: execute a launcher that already exists. No re-derivation, no re-render.
+/mixture-of-loops run the pipeline for specs/007-example
+
+# auto: generate, then run if and only if the launch gate passes.
+/mixture-of-loops derive a pipeline for specs/007-example and run it
+```
+
+An explicit `--auto`, `--run` or `--generate` token in the invocation wins over the prose,
+and "just derive it" or "don't run it" always stays in `generate`. `--implement` and
+`--smoke` reach the launcher only when the request asks for them; `--dry-run` never travels
+with `run` or `auto`, because it is the generation gate rather than an execution mode.
+
+In `run` and `auto` the harness starts the launcher **detached** — stdin closed, its own
+session, colour off, both streams to a log beside the run state — and then supervises it by
+reading the run's own telemetry until it terminates. It reports the stage position, the
+elapsed times and any recovery detail while the run is live, and one digest mirroring the
+launcher's own `DIGEST` line when it ends. It relaunches only a stop the run's own records
+classify as transient, within a budget the contract declares, and announces every relaunch
+before it happens.
 
 ## How it works
 
@@ -66,6 +93,44 @@ sequenceDiagram
     W-->>L: exit code + run_stop.reason
     L-->>U: final digest — stage, evidence paths, next action
 ```
+
+### The supervision loop (`run` and `auto`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant S as Skill (model)
+    participant P as supervise.py
+    participant L as run-007.sh (detached)
+    participant T as runs/007/ — state.json,<br/>launcher.log, run_stop.reason
+
+    U->>S: … and run it
+    S->>P: gate --launcher run-007.sh
+    P-->>S: six named checks, then launch / refuse / attach
+    S->>P: auto --launcher run-007.sh
+    P->>L: argv array, stdin closed, new session, --no-color
+    P->>P: harness-run.json — argv, pid, pgid,<br/>contract digest, relaunch budget
+    P-->>U: [MOL-LAUNCH] pipeline, run dir, stages, budget, how to stop
+    loop until terminal, ≥60s apart, backing off
+        L->>T: stage records, labelled lines, events
+        P->>T: read only
+        P-->>U: [MOL-STATE] k/n, stage, elapsed — or one [MOL-HOLD]
+    end
+    alt classified transient, within budget
+        P-->>U: [MOL-RELAUNCH] exit 22, child exit, run_stop.reason, budget left
+        P->>L: re-invoke; the runtime resumes from its own state.json
+    else anything else
+        P-->>U: [MOL-DIGEST] state, exits, last stage, evidence, next action
+    end
+```
+
+The supervisor only ever reads the run's state: it never edits `state.json`, removes a
+lock, or deletes a run directory. Progress comes from telemetry alone — never from the
+model's narration — and a run is never reported as complete without both a terminal
+`state.json` and an exited process. It refuses to relaunch an invalid or stale contract, a
+preflight block, a lock conflict, a deliberate stop, a postcondition failure, an
+unknown-terminal condition, or an exhausted budget, and says which of those it was.
 
 ### Why it is split this way
 
@@ -236,15 +301,29 @@ shellcheck bin/onboard-skill
 # Tier 2 alone: real discovery by the installed pi and prime loaders, no model
 python3 -m unittest tests.test_harness_discovery -v
 
+# Tier 2 alone: the real launcher executing against a stubbed Specstride, no model.
+# Echoes every message the supervisor emitted, scenario by scenario.
+MOL_SHOW_MESSAGES=1 python3 -m unittest tests.test_execution_e2e -v
+
 # Everything, including the live headless runs (opt-in; local model only)
 MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all
+
+# The run/auto path, live: the model must read the request as `auto`, clear the
+# gate, launch detached, and report the run from its own telemetry
+MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all --mode auto --fixture ready
 ```
 
 - **Tier 1** (`tests/test_mixture_of_loops.py`, `test_onboarding_harnesses.py`,
-  `test_fixtures.py`, `test_e2e_logic.py`) covers the scripts, the linker for every harness
-  (links, `--check`, `--repair`, collisions, pi trust, `--harness all` with and without the
-  agent-dir variables), the fixtures against independently derived expectations, and the
-  live runner's transcript parser and assertions on synthetic transcripts.
+  `test_fixtures.py`, `test_e2e_logic.py`, `test_supervision.py`) covers the scripts, the
+  linker for every harness (links, `--check`, `--repair`, collisions, pi trust, `--harness
+  all` with and without the agent-dir variables), the fixtures against independently
+  derived expectations, and the live runner's transcript parser and assertions on synthetic
+  transcripts. `test_supervision.py` is where the execution policy lives: mode selection
+  from tokens and prose, launcher resolution, each of the six launch-gate refusals by name,
+  the telemetry reader over synthetic `state.json` sequences (absent, partial, unparsable,
+  each terminal state, and a running state with a dead PID), the reporting contract and its
+  cadence, the relaunch classifier as an exhaustive table over exit code x state x stage
+  reason x `run_stop.reason` x budget, and the launch record and budget bounds.
 - **Tier 2** (`tests/test_harness_discovery.py` with `tests/harness_probe.mjs`) imports each
   harness's own resource loader (pi `dist/index.js`; prime the bundle chunks the CLI runs)
   with a temporary `HOME` and agent directories, and checks: one discovery entry from the
@@ -252,6 +331,19 @@ MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all
   an untrusted project in headless mode, prime's `.prime/agent/skills` root and ignored
   `.claude/skills`, broken links, deduplication, collisions, and the harness's own
   `/skill:` expansion. It skips when `node`, `pi` or `prime-agent` is missing.
+- **Tier 2, execution** (`tests/test_execution_e2e.py`) drives the real rendered launcher
+  and the real runtime against the `greeting-ready` fixture with
+  `tests/e2e/exec-stub-bin/specstride` — a second stub that acts like a pipeline, selected
+  by `MOL_EXEC_STUB_MODE`, and used only here. The refusing dry-run stub in
+  `tests/e2e/stub-bin` is untouched, and one of these tests re-proves that a `--dry-run`
+  still writes nothing and invokes nothing in every flag order. The scenarios are: `auto`
+  completing with a digest that matches the launcher's own `DIGEST` line; a detached run
+  reported while it is still running; one classified transient relaunched within budget
+  with an announced reason; a non-retryable exit code and a disallowed `run_stop.reason`
+  each refused by name; a deliberate child stop and a `SIGTERM` reported as intentional and
+  never relaunched; an exhausted budget; a preflight block; `greeting-blocked` refused
+  before anything runs; and a second launcher attaching rather than starting a second run.
+  Every test reaps its process group, and each asserts no leftover process or held lock.
 - **Tier 3** (`tests/e2e/run_harness_e2e.py`, also `tests/test_live_e2e.py` under
   `MOL_LIVE_E2E=1`) runs each harness headlessly (stdin `/dev/null`, no controlling
   terminal, hard timeout) against two fixture repositories in `tests/fixtures/`: one where a
@@ -269,6 +361,18 @@ MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all
   through LiteLLM); the runner skips instead of forcing a llama-swap model swap. Evidence
   (transcripts, repositories, per-run `summary.json`, `report.json`) goes to a new
   temporary directory; `--reevaluate DIR` re-scores saved runs without calling a model.
+
+  `--mode auto` adds a third prompt per harness — "derive a pipeline for
+  specs/001-greeting **and run it**" — in which the only correct behaviour is to read the
+  request as `auto`, clear the gate, launch detached, and report. That mode swaps the
+  refusing stub for the pipeline-acting one in sleep mode, so there is a live run to
+  observe, and its verdicts come from the run's own files and the harness's tool results,
+  never from the model's prose: a run directory exists, the pipeline actually started, the
+  launch record carries its required fields, `state.json` reached `completed`, the
+  launcher printed a `DIGEST`, both run logs are escape-free, at least one `[MOL-STATE]`
+  with `state=running` was reported while it ran, the final `[MOL-DIGEST]` agrees with the
+  launcher's own line, every recorded relaunch was announced, and no process or lock was
+  left behind. `--mode all` runs explicit, implicit and auto.
 
 ### Continuous integration
 
@@ -335,3 +439,57 @@ contract validity and the launcher dry-run for the cells marked pass. Inferred f
 installed sources only: prime's daemon behaviour and `prime-agent shutdown` scope,
 telemetry switches, and the Codex, Claude Code and dsh discovery paths documented above
 (their live runs cover repository-scope `.agents/skills` and `.claude/skills` only).
+
+### `auto` results on 2026-09-20
+
+One live run per harness of
+`run_harness_e2e.py --harness all --mode auto --fixture ready`, on the same local
+`qwen3.8-27b-q5` with thinking off. The prompt is "derive a pipeline for
+specs/001-greeting **and run it**", and the pipeline-acting stub replaces the refusing one
+so there is a real run to supervise.
+
+| | pi | prime | Codex | Claude Code | dsh |
+| --- | --- | --- | --- | --- | --- |
+| Overall | pass (36 assertions) | pass (36) | pass (36) | pass (36) | skipped |
+| Chose `auto` from the prose | yes | yes | yes | yes | — |
+| Launched detached, run reached `completed` | yes | yes | yes | yes | — |
+| Reported an intermediate state from telemetry | yes | yes | yes | yes | — |
+| Final digest matches the launcher's `DIGEST` | yes | yes | yes | yes | — |
+| No leftover process, lock or unannounced relaunch | yes | yes | yes | yes | — |
+| Seconds | 537 | 331 | 615 | 1776 | — |
+
+Deterministic facts were identical across every harness that produced a contract. dsh was
+skipped for the same reason as before — no local backend within the boundaries.
+
+Three things had to be fixed before those cells passed, and each is worth knowing:
+
+- prime ran the skill's scripts through Python `subprocess` instead of `%%bash` or `!` —
+  the behaviour recorded in the 2026-09-19 table above. `SKILL.md` now says in one line
+  that a fenced block is a command line and that a wrapper is where the working directory,
+  the environment and the quoting get lost. prime then used `%%bash` for all nine calls.
+- Claude Code could not reach the local model at all: `500 qwen upstream error`. The cause
+  was outside this package — Claude Code sends `role: "system"` turns *inside* `messages`
+  (its environment preamble, and reminders re-sent each turn), the local Anthropic shim
+  passed the role straight through, and qwen's chat template raises "System message must
+  be at the beginning" for any system turn after the first. The shim now folds every such
+  turn into the single leading system message; its own suite covers it.
+- Claude Code's Bash tool then moved the long-running `supervise.py auto` into the
+  background, so the `[MOL-*]` lines landed in a host-specific task file rather than the
+  tool result. It recovered by reading that file — correctly — which exposed two gaps:
+  the supervisor now also appends every message to `runs/<id>/harness-report.log`, a path
+  this skill owns, and `SKILL.md` says to read it when the stream is lost.
+- Claude Code then rendered the launcher and went back to re-checking the ignore rule
+  instead of launching, until the wall clock ended the run. `SKILL.md` step 9 now says
+  where `auto` goes next: the generated artifacts are complete, go straight to the gate,
+  and do not revisit the generation steps. `--mode auto` also gets its own wall-clock
+  budget (`AUTO_TIMEOUT`, 1800s), because it runs and supervises a pipeline on top of
+  deriving one. This local model is slow and variable on the derivation half — the same
+  half the generation-only modes run — so that cell sits nearer its budget than the rest.
+
+Three of the runtime's documented behaviours turned out to be wrong when checked against
+the code, and each correction is recorded where it is acted on rather than in a separate
+note: an exhausted in-stage recovery records `exit`, not `recovery-exhausted`
+(`supervisor_lib.TRANSIENT_STAGE_REASONS`); exits `20` and `23` print before the launcher
+log exists, so they only reach the harness launch log; and `launcher.log` is shared across
+runs of a pipeline, so the supervisor records a byte offset at launch and reads only past
+it (both in [references/contract.md](skills/mixture-of-loops/references/contract.md)).

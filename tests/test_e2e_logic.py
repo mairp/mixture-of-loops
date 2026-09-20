@@ -350,6 +350,156 @@ class E2ELogicTests(unittest.TestCase):
         context.harness = "pi"
         self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "fail")
 
+    # ── the auto-mode verdicts ────────────────────────────────────────────────
+
+    def execution_run(self, repo: Path, *, state: dict, record: dict | None = None,
+                      digest: str = "[DIGEST] state=completed exit=0 last-stage=verify-greeting "
+                                     "evidence=/e\n") -> Path:
+        """The files a real detached run leaves behind, without running one."""
+        run_dir = repo / ".mixture-of-loops" / "runs" / "greeting"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        (run_dir / "launcher.log").write_text(digest, encoding="utf-8")
+        (run_dir / "harness-launch.log").write_text("", encoding="utf-8")
+        default = {"launcher": str(repo / "run-001-greeting.sh"),
+                   "argv": [str(repo / "run-001-greeting.sh"), "--no-color"],
+                   "pid": 2, "pgid": 2, "launched_at": 1.0, "contract_digest": "d",
+                   "mode": "auto", "run_dir": str(run_dir), "relaunches": [],
+                   "relaunch_budget": {"max_relaunches": 2, "remaining": 2}}
+        (run_dir / "harness-run.json").write_text(json.dumps({**default, **(record or {})}),
+                                                  encoding="utf-8")
+        return run_dir
+
+    COMPLETED = {"pipeline": "greeting", "state": "completed", "exit_reason": "all-stages-complete",
+                 "stages": {"implement-feature": {"status": "completed"},
+                            "verify-greeting": {"status": "completed"}}}
+
+    def auto_script(self, *, reported: list[str]) -> Script:
+        script = happy_script("pi")
+        script.shell(f"python3 {S}/supervise.py auto --launcher run-001-greeting.sh",
+                     error=False)
+        script.lines[-1] = event("tool_execution_end", toolCallId=f"call-{script.count}",
+                                 toolName="bash", isError=False,
+                                 result={"content": [{"type": "text", "text": "\n".join(reported)}]})
+        return script
+
+    def auto_verdicts(self, repo: Path, base: Path, script: Script,
+                      stub_calls: list[dict] | None = None) -> dict[str, str]:
+        context = mol_e2e.RunContext(harness="pi", mode="auto", fixture="greeting-ready", repo=repo,
+                                     transcript=mol_e2e.parse_transcript(script.end()), work=base,
+                                     expect_execution=True,
+                                     execution_stub_calls=stub_calls if stub_calls is not None
+                                     else [{"argv": ["run", "-w", "."], "attempt": 1}])
+        results = mol_e2e.evaluate(context)
+        self.last = results
+        return {r["name"]: r["status"] for r in results}
+
+    def test_an_auto_run_passes_only_with_the_run_state_and_the_reported_digest(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        self.execution_run(repo, state=self.COMPLETED)
+        script = self.auto_script(reported=[
+            "[MOL-STATE] pipeline=greeting stage=1/2 id=implement-feature state=running "
+            "stage-elapsed=2s total-elapsed=2s",
+            "[MOL-DIGEST] pipeline=greeting state=completed exit=0 child-exit=0 "
+            "last-stage=verify-greeting evidence=/e state-path=/s next=\"none\"",
+        ])
+        verdicts = self.auto_verdicts(repo, base, script)
+        self.assertEqual(self.failures(verdicts), [], self.last)
+        for name in ("run-directory", "pipeline-started", "harness-launch-record",
+                     "run-completed", "intermediate-state-reported", "terminal-digest-reported",
+                     "reported-digest-matches-the-launcher", "no-leftover-run-lock"):
+            self.assertEqual(verdicts[name], "pass", name)
+        self.assertNotIn("no-pipeline-started", verdicts,
+                         "a run asked to execute is not graded as one that must not")
+
+    def test_an_auto_run_that_never_started_the_pipeline_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        verdicts = self.auto_verdicts(repo, base, self.auto_script(reported=[]), stub_calls=[])
+        for name in ("run-directory", "pipeline-started", "terminal-digest-reported"):
+            self.assertEqual(verdicts[name], "fail", name)
+
+    def test_a_reading_taken_before_the_first_state_still_counts_as_intermediate(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        self.execution_run(repo, state=self.COMPLETED)
+        script = self.auto_script(reported=[
+            "[MOL-STATE] pipeline=greeting stage=0/2 id=none state=starting "
+            "stage-elapsed=- total-elapsed=0s",
+            "[MOL-DIGEST] pipeline=greeting state=completed exit=0 child-exit=0 "
+            "last-stage=verify-greeting evidence=/e state-path=/s next=\"none\"",
+        ])
+        self.assertEqual(self.auto_verdicts(repo, base, script)["intermediate-state-reported"],
+                         "pass")
+
+    def test_lines_read_back_from_a_file_count_even_when_line_numbered(self) -> None:
+        """A harness whose read tool prefixes every line with its number still reported the
+        supervisor's own lines; what identifies them is the [MOL-…] token."""
+        base, repo = self.repo("greeting-ready")
+        self.execution_run(repo, state=self.COMPLETED)
+        script = self.auto_script(reported=[
+            "1\t[MOL-STATE] pipeline=greeting stage=1/2 id=implement-feature state=running "
+            "stage-elapsed=2s total-elapsed=2s",
+            "2\t[MOL-DIGEST] pipeline=greeting state=completed exit=0 child-exit=0 "
+            "last-stage=verify-greeting evidence=/e state-path=/s next=\"none\"",
+        ])
+        verdicts = self.auto_verdicts(repo, base, script)
+        self.assertEqual(verdicts["intermediate-state-reported"], "pass")
+        self.assertEqual(verdicts["terminal-digest-reported"], "pass")
+
+    def test_narrated_progress_is_not_a_reported_state(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        self.execution_run(repo, state=self.COMPLETED)
+        script = self.auto_script(reported=["the pipeline is running, stage 1 of 2",
+                                            "it completed successfully"])
+        verdicts = self.auto_verdicts(repo, base, script)
+        self.assertEqual(verdicts["intermediate-state-reported"], "fail")
+        self.assertEqual(verdicts["terminal-digest-reported"], "fail")
+        self.assertEqual(verdicts["run-completed"], "pass", "the files still say it completed")
+
+    def test_a_digest_that_disagrees_with_the_launcher_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        self.execution_run(repo, state={**self.COMPLETED, "state": "failed"},
+                           digest="[DIGEST] state=failed exit=22 last-stage=implement-feature "
+                                  "child-exit=3 evidence=/e\n")
+        script = self.auto_script(reported=[
+            "[MOL-STATE] pipeline=greeting stage=1/2 id=implement-feature state=running "
+            "stage-elapsed=2s total-elapsed=2s",
+            "[MOL-DIGEST] pipeline=greeting state=failed exit=0 child-exit=0 "
+            "last-stage=implement-feature evidence=/e state-path=/s next=\"none\"",
+        ])
+        verdicts = self.auto_verdicts(repo, base, script)
+        self.assertEqual(verdicts["reported-digest-matches-the-launcher"], "fail")
+        self.assertEqual(verdicts["run-completed"], "fail")
+        self.assertEqual(verdicts["run-reached-a-terminal-state"], "pass")
+
+    def test_an_unannounced_relaunch_fails(self) -> None:
+        base, repo = self.repo("greeting-ready")
+        self.execution_run(repo, state=self.COMPLETED,
+                           record={"relaunches": [{"reason": "classified-transient"}]})
+        script = self.auto_script(reported=[
+            "[MOL-STATE] pipeline=greeting stage=1/2 id=implement-feature state=running "
+            "stage-elapsed=2s total-elapsed=2s",
+            "[MOL-DIGEST] pipeline=greeting state=completed exit=0 child-exit=0 "
+            "last-stage=verify-greeting evidence=/e state-path=/s next=\"none\"",
+        ])
+        self.assertEqual(self.auto_verdicts(repo, base, script)["every-relaunch-was-announced"],
+                         "fail")
+
+    def test_a_launcher_at_the_skills_default_path_is_found(self) -> None:
+        base, repo = self.repo("greeting-ready", render=False)
+        launcher = repo / ".mixture-of-loops" / "001-greeting" / "run-001-greeting.sh"
+        rendered = mol_e2e.run_script("render_launcher.py", "--contract",
+                                      repo / "launch-contract.json", "--output", launcher,
+                                      cwd=repo)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        self.assertEqual(mol_e2e.locate_launchers(repo), [launcher],
+                         "SKILL.md's own default output path must be discoverable")
+        # A launcher one level below .mixture-of-loops keeps its own artifact root there,
+        # and everything in it is still a copy rather than the contract or a launcher.
+        bundle = next((launcher.parent / ".mixture-of-loops" / "generated").rglob("runtime.py"))
+        self.assertTrue(mol_e2e._generated_or_state(bundle, repo))
+        self.assertEqual(mol_e2e.locate_contract(repo, mol_e2e.Transcript()),
+                         repo / "launch-contract.json")
+
     def test_reading_a_skill_resource_counts_as_loading_it(self) -> None:
         base, repo = self.repo("greeting-ready")
         lines = [json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Read",
