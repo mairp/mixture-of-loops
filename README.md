@@ -103,14 +103,14 @@ sequenceDiagram
     participant S as Skill (model)
     participant P as supervise.py
     participant L as run-007.sh (detached)
-    participant T as runs/007/ — state.json,<br/>launcher.log, run_stop.reason
+    participant T as runs/007/
 
     U->>S: … and run it
     S->>P: gate --launcher run-007.sh
     P-->>S: six named checks, then launch / refuse / attach
     S->>P: auto --launcher run-007.sh
     P->>L: argv array, stdin closed, new session, --no-color
-    P->>P: harness-run.json — argv, pid, pgid,<br/>contract digest, relaunch budget
+    P->>T: harness-run.json — argv, pid, pgid,<br/>contract digest, relaunch budget
     P-->>U: [MOL-LAUNCH] pipeline, run dir, stages, budget, how to stop
     loop until terminal, ≥60s apart, backing off
         L->>T: stage records, labelled lines, events
@@ -119,11 +119,16 @@ sequenceDiagram
     end
     alt classified transient, within budget
         P-->>U: [MOL-RELAUNCH] exit 22, child exit, run_stop.reason, budget left
-        P->>L: re-invoke; the runtime resumes from its own state.json
+        P->>L: re-invoke — the runtime resumes from its own state.json
     else anything else
         P-->>U: [MOL-DIGEST] state, exits, last stage, evidence, next action
     end
 ```
+
+`runs/007/` is `.mixture-of-loops/runs/<pipeline>/`: the runtime owns `state.json`,
+`launcher.log` and `lock` there, the supervisor adds `harness-run.json`,
+`harness-launch.log` and `harness-report.log`, and Specstride's own `run_stop.reason`
+stream stays under the stage's workdir.
 
 The supervisor only ever reads the run's state: it never edits `state.json`, removes a
 lock, or deletes a run directory. Progress comes from telemetry alone — never from the
