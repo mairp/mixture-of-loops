@@ -270,6 +270,23 @@ MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all
   (transcripts, repositories, per-run `summary.json`, `report.json`) goes to a new
   temporary directory; `--reevaluate DIR` re-scores saved runs without calling a model.
 
+### Continuous integration
+
+Every push to `main` and every pull request runs
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml): a parse-only syntax check, `bash -n`
+on the linker, and Tier 1 across Python 3.10 to 3.13. Tier 2 skips on the runner because no
+harness binary is installed there, and Tier 3 stays behind `MOL_LIVE_E2E`, so CI never calls
+a model. The matrix fans into one `ci` job, which is the single check that `main`'s branch
+protection and Mergify both require.
+
+The syntax check parses with `ast.parse` rather than `compileall` on purpose: `compileall`
+writes `__pycache__` beside every source it touches, including the two fixture repositories,
+and `test_fixtures_differ_only_by_the_prerequisite` asserts those trees are byte-identical
+apart from the approval file.
+
+Label a pull request `automerge` and Mergify queues it once `ci` is green, squashes it, and
+lets GitHub delete the head branch. Unlabelled pull requests wait to be merged by hand.
+
 ### Results on 2026-09-19
 
 Tested with pi 0.80.6, prime-agent 0.7.3 (launcher `c9f77c3`), Codex CLI 0.153.4, Claude
