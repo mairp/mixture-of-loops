@@ -17,9 +17,3 @@ merge_protections:
       # `ci` is the single gate job that fans in the whole test matrix.
       - check-success = ci
 
-pull_request_rules:
-  - name: Delete the head branch after merge
-    conditions:
-      - merged
-    actions:
-      delete_head_branch: {}
