@@ -26,6 +26,8 @@ LEGACY_LIVE_KEY = "wiggum_live"
 # predates the rename keeps using in place.
 STATE_DIRNAME = ".specstride"
 LEGACY_STATE_DIRNAME = ".wiggum"
+# Generated bundles and run state live here, beside the launcher that owns them.
+ARTIFACT_DIRNAME = ".mixture-of-loops"
 CHECKS = {
     "file_exists",
     "dir_exists",
@@ -174,6 +176,19 @@ def check_source_hashes(contract: dict) -> list[str]:
                     continue
             stale.append(f"sources[{index}] hash changed: {path}")
     return stale
+
+
+def artifact_root(launcher_dir: Path) -> Path:
+    """Where a launcher in `launcher_dir` keeps its bundles and run state.
+
+    A launcher rendered into the artifact directory itself keeps that directory
+    rather than nesting a second one below it, so bundles and run state hold the
+    same paths whether the launcher sits at the repository root or beside them.
+    """
+    launcher_dir = Path(launcher_dir)
+    if launcher_dir.name == ARTIFACT_DIRNAME:
+        return launcher_dir
+    return launcher_dir / ARTIFACT_DIRNAME
 
 
 def state_dirname(cwd: Path) -> str:

@@ -28,6 +28,7 @@ from contract_lib import (
     STATE_DIRNAME,
     ContractError,
     StaleSourceError,
+    artifact_root,
     load_contract,
     resolve_path,
     state_dirname,
@@ -543,7 +544,7 @@ def main() -> int:
         return dry_run(contract, args.implement, args.smoke, color)
 
     launch_dir = Path(args.launch_dir).resolve()
-    run_dir = launch_dir / ".mixture-of-loops" / "runs" / contract["id"]
+    run_dir = artifact_root(launch_dir) / "runs" / contract["id"]
     run_dir.mkdir(parents=True, exist_ok=True)
     reporter = Reporter(run_dir / "launcher.log", color)
     lock_handle = (run_dir / "lock").open("a+")

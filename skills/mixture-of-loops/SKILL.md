@@ -18,18 +18,38 @@ tool name.
 Determine from the request and repository:
 
 - repository root and feature/spec paths;
-- output launcher path, defaulting to `run-<feature>.sh` at the repository root;
+- output launcher path, defaulting to `.mixture-of-loops/run-<feature>.sh`;
 - explicit backend, model, budget, telemetry, infrastructure, and recovery choices.
 
 Keep visible defaults for values the user did not specify. Generation writes a launch
 contract and launcher bundle; it does not execute the pipeline unless the user separately
 asks to run it.
 
+Every generated artifact belongs under `.mixture-of-loops/` at the repository root: the
+contract at `.mixture-of-loops/<feature>/launch-contract.json`, the launcher beside it,
+and the bundle and run state in the subdirectories the runtime owns. Leave nothing
+generated at the repository root. Honor an output path the user gives instead, including
+an existing root-level launcher, which keeps working unchanged.
+
 ## Workflow
 
 1. Read [references/derivation.md](references/derivation.md). Inventory all supplied
    feature artifacts and relevant repository instructions before deriving stages.
-2. Bootstrap a provenance-bound draft:
+2. Before writing any artifact, make a Git repository ignore `.mixture-of-loops/`, so the
+   first `git status` after generation stays clean. Append the rule once, idempotently,
+   and say which file received it. Use the repository's `.gitignore` by default and
+   `.git/info/exclude` when the user prefers to leave shared files untouched:
+
+   ```text
+   .mixture-of-loops/*
+   !.mixture-of-loops/*/
+   !.mixture-of-loops/**/launch-contract.json
+   ```
+
+   These negations keep the contract committable, since Git does not descend into a
+   wholly ignored directory. Offer plain `.mixture-of-loops/` when the user wants the
+   contract ignored too.
+3. Bootstrap a provenance-bound draft:
 
    ```text
    python3 SKILL_ROOT/scripts/bootstrap_contract.py \
@@ -38,23 +58,23 @@ asks to run it.
 
    Repeat `--feature` for an explicitly supplied dependent feature set. Do not broaden
    execution scope merely because another feature is referenced for context.
-3. Read every inventoried execution-relevant source in full. Complete the contract using
+4. Read every inventoried execution-relevant source in full. Complete the contract using
    [references/contract.md](references/contract.md) and
    [assets/launch-contract.schema.json](assets/launch-contract.schema.json). Give every
    obligation provenance and a disposition. Reserve model judgment for semantic
    classification, command-to-phase reconciliation, dependencies, and policy timing.
-4. Preserve declared verification commands as fixed `executable` plus `args`; never
+5. Preserve declared verification commands as fixed `executable` plus `args`; never
    invent a plausible command. An absent or conflicting declaration is an explicit
    finding. Keep Specstride's verification plan separate from the launch contract and pass it
    with `--verification-commands`.
-5. Classify prerequisites by producer and earliest valid check. A future stage output is
+6. Classify prerequisites by producer and earliest valid check. A future stage output is
    not a preflight input. Existing authorization may be consumed within its scope;
    missing non-delegable authority blocks before the affected model run. Never fabricate
    a signature, identity, approval, budget, tolerance, or deployment authority.
-6. Make stage order explicit and serial unless actual interfaces and shared-state rules
+7. Make stage order explicit and serial unless actual interfaces and shared-state rules
    prove concurrency safe. Use argv arrays and environment references, never shell
    strings, `eval`, `sh -c`, or blanket answers to prompts.
-7. Validate, then render:
+8. Validate, then render:
 
    ```text
    python3 SKILL_ROOT/scripts/validate_contract.py LAUNCH_CONTRACT
@@ -65,7 +85,7 @@ asks to run it.
    If validation cannot reach `validated`, still leave the reviewable draft and report
    each blocker. Do not render a launch-ready script from unresolved execution-critical
    findings.
-8. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`. Dry-run is read-only and
+9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`. Dry-run is read-only and
    takes precedence over `--implement` and `--smoke` in every argument order. Run further
    stubbed checks when the generated setup, decision, or recovery logic warrants them.
 
