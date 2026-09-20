@@ -286,6 +286,15 @@ apart from the approval file.
 
 Label a pull request `automerge` and Mergify queues it once `ci` is green, squashes it, and
 lets GitHub delete the head branch. Unlabelled pull requests wait to be merged by hand.
+Dependabot's weekly action bumps carry the label already, so a green bump lands on its own.
+
+`main` requires the `ci` check, rejects force pushes and deletions, and enforces all of that
+for administrators too, so there is no way to put an untested commit on it — every change
+goes through a pull request. The label alone merges nothing: it is one of two conditions,
+and the other is `ci` passing. Both halves are tested. A deliberately failing pull request
+was refused by all of it — `ci` failed, Mergify held `ci-must-pass` open while the label
+condition sat satisfied, the queue never took it, and an administrator merge was rejected
+with `the base branch policy prohibits the merge`.
 
 ### Results on 2026-09-19
 
