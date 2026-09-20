@@ -100,8 +100,10 @@ ambiguous Specstride outcomes, include a correlated JSONL reason constraint. A r
 ## Generated bundle
 
 `render_launcher.py` publishes a content-addressed bundle below
-`.mixture-of-loops/generated/<id>/<contract-hash>/` and atomically replaces the stable
-launcher last. The bundle contains the exact contract and runtime. An interrupted render
+`.mixture-of-loops/generated/<id>/<contract-hash>/`, beside the launcher, and atomically
+replaces the stable launcher last. A launcher rendered into `.mixture-of-loops/` itself
+uses that directory rather than nesting a second one below it, so bundles and run state
+hold the same paths as they do for a launcher at the repository root. The bundle contains the exact contract and runtime. An interrupted render
 therefore leaves the previous launcher pointing at a complete previous bundle.
 
 The renderer refuses to replace a launcher whose generated digest no longer matches. Put

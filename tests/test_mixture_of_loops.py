@@ -181,6 +181,44 @@ class MixtureOfLoopsTests(unittest.TestCase):
             self.assertEqual(refused.returncode, 20, refused.stdout)
             self.assertIn("refusing to replace", refused.stdout)
 
+    def test_launcher_inside_the_artifact_dir_keeps_one_level_and_the_same_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            source = repository / "spec.md"
+            source.write_text("fixture\n", encoding="utf-8")
+            stage = {
+                "id": "make-evidence",
+                "kind": "command",
+                "depends_on": [],
+                "cwd": ".",
+                "action": {"argv": ["/usr/bin/touch", "done"], "timeout_seconds": 10},
+                "preconditions": [{"type": "command_available", "name": "touch", "timing": "preflight"}],
+                "postconditions": [{"type": "file_exists", "path": "done"}],
+                "evidence": ["done"],
+            }
+            artifacts = repository / ".mixture-of-loops"
+            (artifacts / "fixture").mkdir(parents=True)
+            contract = artifacts / "fixture" / "launch-contract.json"
+            contract.write_text(json.dumps(base_contract(repository, source, [stage]), indent=2), encoding="utf-8")
+            launcher = artifacts / "run-fixture.sh"
+            rendered = run(sys.executable, SCRIPTS / "render_launcher.py",
+                           "--contract", contract, "--output", launcher)
+            self.assertEqual(rendered.returncode, 0, rendered.stdout)
+
+            bundle = next((artifacts / "generated").rglob("launch-contract.json")).parent
+            self.assertEqual(bundle.parent.parent, artifacts / "generated")
+            self.assertFalse((artifacts / ".mixture-of-loops").exists())
+
+            executed = run(launcher, "--no-color", cwd=repository)
+            self.assertEqual(executed.returncode, 0, executed.stdout)
+            # The stage resolved its cwd from the contract's repository root, not the launcher.
+            self.assertTrue((repository / "done").is_file())
+            # Run state holds the path a repository-root launcher would have used.
+            state = json.loads((artifacts / "runs" / "fixture-pipeline" / "state.json").read_text())
+            self.assertEqual(state["state"], "completed")
+            self.assertEqual(sorted(path.name for path in repository.iterdir()),
+                             [".mixture-of-loops", "done", "spec.md"])
+
     def test_setup_opt_in_and_reason_bound_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)

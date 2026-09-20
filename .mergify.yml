@@ -1,0 +1,28 @@
+queue_rules:
+  - name: default
+    merge_method: squash
+    # Green before entering the queue, and still green before the merge lands.
+    queue_conditions:
+      - check-success=ci
+    merge_conditions:
+      - check-success=ci
+
+pull_request_rules:
+  - name: Automatic merge when CI passes
+    # This is a single-maintainer repository, so there is no approval
+    # condition: a review requirement here would deadlock every PR.
+    conditions:
+      - base=main
+      - label=automerge
+      - -draft
+      - -conflict
+      - check-success=ci
+    actions:
+      queue:
+        name: default
+
+  - name: Delete the head branch after merge
+    conditions:
+      - merged
+    actions:
+      delete_head_branch: {}

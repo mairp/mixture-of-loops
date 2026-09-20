@@ -13,7 +13,14 @@ import stat
 import sys
 import tempfile
 
-from contract_lib import ContractError, StaleSourceError, canonical_bytes, load_contract, validate_contract
+from contract_lib import (
+    ContractError,
+    StaleSourceError,
+    artifact_root,
+    canonical_bytes,
+    load_contract,
+    validate_contract,
+)
 
 
 DIGEST_RE = re.compile(r"^(# generated-content-sha256: )[0-9a-f]{64}$", re.MULTILINE)
@@ -57,7 +64,7 @@ def write_atomic_file(path: Path, content: bytes, mode: int) -> None:
 def publish_bundle(contract: dict, output: Path, scripts_dir: Path) -> tuple[Path, str]:
     contract_content = canonical_bytes(contract)
     contract_hash = hashlib.sha256(contract_content).hexdigest()
-    bundle_parent = output.parent / ".mixture-of-loops" / "generated" / contract["id"]
+    bundle_parent = artifact_root(output.parent) / "generated" / contract["id"]
     bundle = bundle_parent / contract_hash[:20]
     bundle_parent.mkdir(parents=True, exist_ok=True)
     if bundle.exists():
