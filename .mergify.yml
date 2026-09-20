@@ -1,26 +1,23 @@
 queue_rules:
   - name: default
     merge_method: squash
-    # Green before entering the queue, and still green before the merge lands.
-    queue_conditions:
-      - check-success=ci
-    merge_conditions:
-      - check-success=ci
+
+merge_protections_settings:
+  # Label-gated auto-merge: a pull request carrying `automerge` is queued as
+  # soon as the protections below pass. Everything else waits to be merged by
+  # hand or with the `@mergifyio queue` command.
+  auto_merge_conditions:
+    - label = automerge
+
+merge_protections:
+  - name: ci-must-pass
+    if:
+      - base = main
+    success_conditions:
+      # `ci` is the single gate job that fans in the whole test matrix.
+      - check-success = ci
 
 pull_request_rules:
-  - name: Automatic merge when CI passes
-    # This is a single-maintainer repository, so there is no approval
-    # condition: a review requirement here would deadlock every PR.
-    conditions:
-      - base=main
-      - label=automerge
-      - -draft
-      - -conflict
-      - check-success=ci
-    actions:
-      queue:
-        name: default
-
   - name: Delete the head branch after merge
     conditions:
       - merged
