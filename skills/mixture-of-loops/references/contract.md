@@ -142,6 +142,47 @@ Absent, the conservative default applies: at most two relaunches, and a ceiling 
 clock those three attempts declare. The budget is derived from the contract, never chosen
 by the model at run time.
 
+## Learned decisions
+
+`configuration.learning` is optional. It binds the part of Specstride's decision log that
+existed at derivation time into the contract, so the digest records which learned values a
+run may act on:
+
+```json
+{
+  "configuration": {
+    "learning": {
+      "mode": "apply",
+      "decisions_through": "learn-3f2a9c1b0d4e",
+      "decisions_sha256": "<SHA-256 of applied.json up to and including that run id's line>",
+      "effective": {"proposer_timeout": {"3": 2700}},
+      "source_path": ".specstride/features/007/learning/applied.json"
+    }
+  }
+}
+```
+
+- `mode` is the `SPECSTRIDE_LEARNING` every `specstride` stage declares.
+- `decisions_through` is the `run_id` of the last `applied.json` line bound. Every
+  `specstride` stage declares it as `SPECSTRIDE_LEARNING_THROUGH`, a literal, in both
+  `action.env` and `resume.env`; Specstride's `resolve` then ignores any `apply` written
+  after it. A stage that declares `SPECSTRIDE_LEARNING_THROUGH` with no block is rejected.
+- `decisions_sha256` hashes that prefix, and `source_path` locates it relative to
+  `repository.root`. Only the prefix is bound, so later appends never make the contract
+  stale. When the prefix itself changes, validation with source checks fails with
+  `learning-decisions-changed`: the launch gate refuses by that name, and so does the relaunch
+  classifier, which the contract digest alone cannot tell (the log is not a source; hashing
+  it whole would refuse every relaunch). `applied.json` is never registered in `sources[]`.
+- `effective` is the value in effect per knob and phase at `decisions_through`. It is an
+  **upper bound** on what runs, not a promise: a revert after derivation — Specstride's
+  automatic revert on a guardrail breach, `--revert` or `--off` — still takes effect, because
+  it only moves a knob toward its default. The `arm` Specstride records on each pass says
+  what actually ran.
+
+`bootstrap_contract.py` fills the block from `--applied-file` (or, for one feature, that
+feature's `learning/applied.json`), bound through its last line, with the mode from
+`--learning-mode` (default `off`).
+
 ## Generated bundle
 
 `render_launcher.py` publishes a content-addressed bundle below

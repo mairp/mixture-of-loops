@@ -86,7 +86,12 @@ overrides in the resume argv rather than assuming every environment setting was 
 Declare Specstride's learning mode in each `specstride` stage's `env` when it should be
 anything but `off`: `"SPECSTRIDE_LEARNING": "suggest"` or `"apply"`, as a literal. The
 runtime strips any inherited value and passes `off` to a stage that declares nothing, so
-the mode in the contract is the mode that runs. Never register a file under Specstride's
+the mode in the contract is the mode that runs. When the feature has a decision log, keep
+the `configuration.learning` block the bootstrap emitted and expand it into every
+`specstride` stage's `action.env` and `resume.env` at derivation time:
+`SPECSTRIDE_LEARNING` = its `mode` and `SPECSTRIDE_LEARNING_THROUGH` = its
+`decisions_through`, both literals. Validation cross-checks the literals against the block;
+the runtime injects nothing from it. Never register a file under Specstride's
 `learning/` directory as a contract source; validation rejects it (see the contract
 reference).
 

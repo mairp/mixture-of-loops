@@ -10,7 +10,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from contract_lib import learning_effective, learning_prefix, state_dirname  # noqa: E402
 
 
 ARTIFACTS = (
@@ -325,11 +329,44 @@ def build_contract(root: Path, features: list[Path]) -> dict:
     }
 
 
+def learning_block(root: Path, applied: Path, mode: str) -> dict | None:
+    """configuration.learning for Specstride's decision log at `applied`, bound through
+    its last entry: the mode, that entry's run id, the SHA-256 of the log up to it, the
+    values in effect there, and the log's path relative to the repository. None when
+    there is no log to bind. Every specstride stage must then declare SPECSTRIDE_LEARNING
+    = mode and SPECSTRIDE_LEARNING_THROUGH = decisions_through as literals in its env."""
+    if not applied.is_file():
+        return None
+    through = None
+    for line in applied.read_bytes().splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("run_id"), str):
+            through = entry["run_id"]
+    if through is None:
+        return None
+    prefix = learning_prefix(applied, through) or b""
+    return {
+        "mode": mode,
+        "decisions_through": through,
+        "decisions_sha256": hashlib.sha256(prefix).hexdigest(),
+        "effective": learning_effective(prefix),
+        "source_path": relative_or_absolute(applied, root),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="repository root")
     parser.add_argument("--feature", action="append", default=[], help="feature directory; repeatable")
     parser.add_argument("--output", default="-", help="output JSON path, or - for stdout")
+    parser.add_argument("--applied-file",
+                        help="Specstride's learning/applied.json to bind into configuration.learning "
+                             "(default: <state dir>/features/<slug>/learning/applied.json of a single feature)")
+    parser.add_argument("--learning-mode", default="off", choices=("off", "suggest", "apply"),
+                        help="the SPECSTRIDE_LEARNING every specstride stage will declare (default: off)")
     args = parser.parse_args()
     root = Path(args.repo).resolve()
     if not root.is_dir():
@@ -337,6 +374,12 @@ def main() -> int:
     try:
         features = resolve_features(root, args.feature)
         contract = build_contract(root, features)
+        applied = (Path(args.applied_file).resolve() if args.applied_file else
+                   root / state_dirname(root) / "features" / features[0].name / "learning" / "applied.json"
+                   if len(features) == 1 else None)
+        block = learning_block(root, applied, args.learning_mode) if applied else None
+        if block is not None:
+            contract["configuration"]["learning"] = block
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     rendered = json.dumps(contract, indent=2, sort_keys=True, ensure_ascii=False) + "\n"

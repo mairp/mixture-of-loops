@@ -1056,3 +1056,122 @@ class RetrospectiveTests(Fixture):
         self.assertIn("[MOL-RETRO]", result.stdout)
         self.assertIn("status=unavailable", result.stdout)
         self.assertIn("retrospectives/", result.stdout)
+
+
+# ── configuration.learning: a bound prefix of Specstride's decision log ──────
+
+import bootstrap_contract  # noqa: E402
+
+DECISIONS = [
+    {"schema": "specstride.learn.applied/2", "action": "apply", "run_id": "learn-aaa", "knob": "proposer_timeout",
+     "phase": 3, "shape": "s3", "value": 2400, "previous": 1800},
+    {"schema": "specstride.learn.applied/2", "action": "evaluate", "run_id": "learn-bbb",
+     "evaluates_run_id": "learn-aaa", "knob": "proposer_timeout", "phase": 3, "label": "neutral"},
+]
+
+
+def learning_stage(env: dict) -> dict:
+    stage = json.loads(json.dumps(RETRY_STAGE))
+    stage["action"]["env"] = dict(env)
+    return stage
+
+
+class LearningBindingTests(Fixture):
+    def bound(self, mode: str = "apply", env: dict | None = None) -> tuple[Path, Path, Path, dict]:
+        base = self.workspace()
+        applied = base / ".specstride" / "features" / "007" / "learning" / "applied.json"
+        applied.parent.mkdir(parents=True)
+        applied.write_text("".join(json.dumps(d) + "\n" for d in DECISIONS), encoding="utf-8")
+        block = bootstrap_contract.learning_block(base, applied, mode)
+        stage_env = env if env is not None else {"SPECSTRIDE_LEARNING": mode,
+                                                  "SPECSTRIDE_LEARNING_THROUGH": block["decisions_through"]}
+        contract = contract_for(base, [learning_stage(stage_env)])
+        contract["configuration"] = {"learning": block}
+        return base, applied, render(contract, base), contract
+
+    def test_bootstrap_binds_the_whole_log_with_its_hash_and_effective_values(self) -> None:
+        base, applied, _launcher, contract = self.bound()
+        block = contract["configuration"]["learning"]
+        self.assertEqual(set(block), contract_lib.LEARNING_KEYS)
+        self.assertEqual(block["decisions_through"], "learn-bbb")
+        self.assertEqual(block["decisions_sha256"], digest(applied))
+        self.assertEqual(block["effective"], {"proposer_timeout": {"3": 2400}})
+        self.assertEqual(block["source_path"], ".specstride/features/007/learning/applied.json")
+
+    def test_later_appends_keep_the_contract_valid(self) -> None:
+        _base, applied, launcher, _contract = self.bound()
+        with applied.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"action": "apply", "run_id": "learn-ccc", "knob": "proposer_timeout",
+                                     "phase": 3, "value": 3000}) + "\n")
+        self.assertEqual(mol.read_bundle(launcher).pipeline, "fixture-pipeline")
+
+    def test_a_changed_prefix_is_refused_by_name_at_the_gate_and_the_relaunch(self) -> None:
+        _base, applied, launcher, _contract = self.bound()
+        bundle = mol.read_bundle(launcher)
+        applied.write_text(applied.read_text().replace("2400", "2700"), encoding="utf-8")
+        with self.assertRaises(contract_lib.LearningDecisionsChanged):
+            mol.read_bundle(launcher)
+        self.assertEqual(mol.gate(launcher).reason, "learning-decisions-changed")
+        record = {"pipeline": "fixture-pipeline", "launcher": str(launcher), "run_dir": str(bundle.run_dir),
+                  "contract_digest": bundle.digest,
+                  "relaunch_budget": {"max_relaunches": 2, "remaining": 2, "wall_clock_seconds": 600,
+                                      "deadline": 10_000, "declared_pipeline_seconds": 120, "source": "default"},
+                  "relaunches": []}
+        observation = mol.Observation(status="failed", pipeline="fixture-pipeline", alive=False,
+                                      run_state="failed", stage_id="run-feature", stage_index=1,
+                                      stage_count=1, launcher_exit=mol.E_STAGE, child_exit=4,
+                                      stage_reason="exit", stop_reason="wall_budget",
+                                      contract_digest=bundle.digest)
+        stale = mol.read_bundle(launcher, check_sources=False)
+        decision = mol.classify_relaunch(observation, record, stale, now=0)
+        self.assertFalse(decision.relaunch)
+        self.assertEqual(decision.reason, "learning-decisions-changed")
+
+    def test_stage_literals_must_match_the_block(self) -> None:
+        base = self.workspace()
+        applied = base / "applied.json"
+        applied.write_text("".join(json.dumps(d) + "\n" for d in DECISIONS), encoding="utf-8")
+        block = bootstrap_contract.learning_block(base, applied, "apply")
+        cases = {
+            "mode": {"SPECSTRIDE_LEARNING": "suggest", "SPECSTRIDE_LEARNING_THROUGH": "learn-bbb"},
+            "through": {"SPECSTRIDE_LEARNING": "apply", "SPECSTRIDE_LEARNING_THROUGH": "learn-aaa"},
+            "missing": {"SPECSTRIDE_LEARNING": "apply"},
+        }
+        for name, env in cases.items():
+            with self.subTest(name):
+                contract = contract_for(base, [learning_stage(env)])
+                contract["configuration"] = {"learning": block}
+                with self.assertRaises(contract_lib.ContractError):
+                    contract_lib.validate_contract(contract, check_sources=False)
+        unbound = contract_for(base, [learning_stage({"SPECSTRIDE_LEARNING": "apply",
+                                                      "SPECSTRIDE_LEARNING_THROUGH": "learn-bbb"})])
+        with self.assertRaisesRegex(contract_lib.ContractError, "needs a configuration.learning"):
+            contract_lib.validate_contract(unbound, check_sources=False)
+        referenced = contract_for(base, [learning_stage({
+            "SPECSTRIDE_LEARNING": "apply",
+            "SPECSTRIDE_LEARNING_THROUGH": {"from_env": "THROUGH", "required": False}})])
+        referenced["configuration"] = {"learning": block}
+        with self.assertRaisesRegex(contract_lib.ContractError, "literal run id"):
+            contract_lib.validate_contract(referenced, check_sources=False)
+        broken = dict(block, extra=1)
+        contract = contract_for(base, [learning_stage(cases["through"])])
+        contract["configuration"] = {"learning": broken}
+        with self.assertRaisesRegex(contract_lib.ContractError, "must have exactly"):
+            contract_lib.validate_contract(contract, check_sources=False)
+
+    def test_bootstrap_cli_emits_the_block_for_an_explicit_applied_file(self) -> None:
+        base = self.workspace()
+        feature = base / "specs" / "007-demo"
+        feature.mkdir(parents=True)
+        (feature / "tasks.md").write_text("## Phase 3: Build\n\n- [ ] T001 build it\n", encoding="utf-8")
+        applied = base / "applied.json"
+        applied.write_text(json.dumps(DECISIONS[0]) + "\n", encoding="utf-8")
+        result = subprocess.run([sys.executable, str(SCRIPTS / "bootstrap_contract.py"), "--repo", str(base),
+                                 "--feature", str(feature), "--applied-file", str(applied),
+                                 "--learning-mode", "suggest"],
+                                capture_output=True, text=True, check=False,
+                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        block = json.loads(result.stdout)["configuration"]["learning"]
+        self.assertEqual(block["mode"], "suggest")
+        self.assertEqual(block["decisions_through"], "learn-aaa")
