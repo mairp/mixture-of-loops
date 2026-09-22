@@ -130,6 +130,11 @@ sequenceDiagram
 `harness-launch.log` and `harness-report.log`, and Specstride's own `run_stop.reason`
 stream stays under the stage's workdir.
 
+A `specstride` stage inherits no learning mode. The runtime strips `SPECSTRIDE_LEARNING`
+from every child's environment and passes `off` unless the stage's own `env` declares
+`suggest` or `apply`, so an `apply` left in the operator's shell cannot change a run the
+contract does not describe.
+
 The supervisor only ever reads the run's state: it never edits `state.json`, removes a
 lock, or deletes a run directory. Progress comes from telemetry alone — never from the
 model's narration — and a run is never reported as complete without both a terminal
