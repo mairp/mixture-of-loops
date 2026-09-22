@@ -130,6 +130,14 @@ sequenceDiagram
 `harness-launch.log` and `harness-report.log`, and Specstride's own `run_stop.reason`
 stream stays under the stage's workdir.
 
+`supervise.py retro --launcher run-007.sh` is a read-only retrospective: for each
+`specstride` stage it asks Specstride's learning layer (`specstride learn --summarize` and
+`--evaluate`) what it measured and how its applied decisions evaluated, and writes that to
+`runs/007/retrospectives/<contract-digest>.json`. It may print a suggested
+`specstride learn --revert <run-id>`; it never applies or reverts anything, and it writes
+nothing outside the run directory. Missing data, or an older Specstride, is reported as
+`unavailable`.
+
 A `specstride` stage inherits no learning mode. The runtime strips `SPECSTRIDE_LEARNING`
 from every child's environment and passes `off` unless the stage's own `env` declares
 `suggest` or `apply`, so an `apply` left in the operator's shell cannot change a run the

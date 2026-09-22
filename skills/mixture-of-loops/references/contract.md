@@ -164,7 +164,7 @@ binding starts a fresh stage record. A supervisor that relaunches across such a 
 would restart the pipeline without saying so, which is why it compares the digest in
 `state.json` with the one it recorded at launch and stops instead.
 
-A supervising harness adds two files of its own to the same directory and reads everything
+A supervising harness adds files of its own to the same directory and reads everything
 else there without writing to it:
 
 - `harness-run.json`: the launcher path, the exact argv, the child PID and process-group
@@ -180,6 +180,16 @@ else there without writing to it:
   printed and free of escape sequences. A harness that backgrounds a long-running
   supervision command, or truncates its output, can recover the same messages from here
   instead of from whatever file it happened to redirect to.
+- `retrospectives/<contract-digest>.json`: written by `supervise.py retro`, one file per
+  contract digest, because `runs/<id>` is keyed on the pipeline and reused across every
+  relaunch and re-derivation. For each `specstride` stage it records what Specstride's
+  learning layer reports through `specstride learn --summarize` and `--evaluate` (both
+  read-only), and the `specstride learn --revert <run-id>` it would suggest for a decision
+  evaluated `regressed`. It never runs `apply` or `revert` and writes nothing outside the
+  run directory. The stage's Specstride feature is found from `recovery.reason.jsonl`, then
+  `evidence[0]`, then a postcondition path naming `.specstride/features/<slug>` (or the
+  legacy state dir); a stage with none of them, or a Specstride without those flags, is
+  reported `unavailable` and the command still exits 0.
 
 Color precedence is `--no-color`, an explicit `--color`, a present `NO_COLOR`, then
 automatic TTY detection. In `always` mode with redirected output, the runtime gives a Specstride stage a

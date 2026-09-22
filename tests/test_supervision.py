@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "mixture-of-loops" / "scripts"
@@ -946,3 +947,112 @@ class StopTests(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── retro: a read-only retrospective of the pipeline's learning state ─────────
+
+STUB_SPECSTRIDE = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["STUB_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\\n")
+mode = next((a for a in args if a in ("--summarize", "--evaluate")), None)
+if mode == "--evaluate" and os.environ.get("STUB_NO_EVALUATE"):
+    sys.stderr.write("specstride learn: unknown option '--evaluate'\\n")
+    sys.exit(1)
+if "--help" in args:
+    print("usage: learn.py ...")
+    sys.exit(0)
+if mode == "--summarize":
+    print(json.dumps({"schema": "specstride.learn.summary/7", "totals": {"runs": 2},
+                      "phases": {"3": {"title": "Build", "attempts_total": 4, "cost_usd": 9.5}}}))
+elif mode == "--evaluate":
+    print("learn: phase 3 proposer_timeout 1800s→2700s [learn-0a1b2c]: regressed — cost r=+1.40 (MDE ±1.15, n=7/6)")
+    print("learn: phase 4 proposer_timeout 1800s→1200s [learn-3d4e5f]: neutral — cost r=-0.20 (MDE ±1.15, n=6/6)")
+"""
+
+
+def specstride_stage(*, recovery: bool = True, feature_paths: bool = True) -> dict:
+    stage = {"id": "run-feature", "kind": "specstride", "depends_on": [], "cwd": ".",
+             "action": {"argv": ["specstride", "run", "-w", ".", "--feature", "007"],
+                        "timeout_seconds": 30},
+             "preconditions": [],
+             "postconditions": [{"type": "file_exists",
+                                 "path": ".specstride/features/007/PROGRESS.md" if feature_paths else "done"}],
+             "evidence": [".specstride/features/007" if feature_paths else "done"]}
+    if recovery:
+        stage["recovery"] = {"max_attempts": 2, "backoff_seconds": [1], "retry_exit_codes": [4],
+                             "reason": {"jsonl": ".specstride/features/007/events.jsonl", "event": "run_stop",
+                                        "field": "reason", "allowed": ["wall_budget"]}}
+    return stage
+
+
+class RetrospectiveTests(Fixture):
+    def setup_stub(self, base: Path, **env: str) -> Path:
+        bin_dir = base / "stub-bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "specstride"
+        stub.write_text(STUB_SPECSTRIDE, encoding="utf-8")
+        stub.chmod(0o755)
+        log = base / "stub-calls.jsonl"
+        patched = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}", "STUB_LOG": str(log), **env}
+        patcher = unittest.mock.patch.dict(os.environ, patched)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return log
+
+    def snapshot(self, base: Path, run_dir: Path) -> dict:
+        out = {}
+        for path in base.rglob("*"):
+            if path.is_file() and run_dir not in path.parents and path.name != "stub-calls.jsonl":
+                out[str(path)] = path.read_bytes()
+        return out
+
+    def test_retro_reads_learning_state_and_writes_only_under_its_run_dir(self) -> None:
+        base, launcher = self.repository([specstride_stage()])
+        log = self.setup_stub(base)
+        bundle = mol.read_bundle(launcher, check_sources=False)
+        before = self.snapshot(base, bundle.run_dir)
+        document = mol.retrospective(bundle)
+        path = mol.write_retrospective(bundle.run_dir, document)
+        self.assertEqual(path, bundle.run_dir / "retrospectives" / f"{bundle.digest}.json")
+        written = json.loads(path.read_text())
+        self.assertEqual(written["contract_digest"], bundle.digest)
+        stage = written["stages"][0]
+        self.assertEqual(stage["status"], "ok", stage)
+        self.assertEqual(stage["feature"], "007")
+        self.assertEqual(stage["workdir"], str(base))
+        self.assertEqual(stage["totals"], {"runs": 2})
+        self.assertEqual(len(stage["evaluations"]), 2)
+        self.assertEqual(stage["suggestions"],
+                         [f"specstride learn -w {base} --feature 007 --revert learn-0a1b2c"])
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(all(call[0] == "learn" for call in calls))
+        # it suggests a revert; it never applies or reverts anything
+        self.assertFalse(any(flag in call for call in calls for flag in ("--apply", "--revert", "--off")))
+        self.assertEqual(self.snapshot(base, bundle.run_dir), before)
+
+    def test_retro_reports_unavailable_when_specstride_lacks_evaluate(self) -> None:
+        base, launcher = self.repository([specstride_stage()])
+        self.setup_stub(base, STUB_NO_EVALUATE="1")
+        stage = mol.retrospective(mol.read_bundle(launcher, check_sources=False))["stages"][0]
+        self.assertEqual(stage["status"], "unavailable")
+        self.assertIn("--evaluate", stage["reason"])
+
+    def test_retro_on_a_stage_without_any_feature_path_is_unavailable(self) -> None:
+        base, launcher = self.repository([specstride_stage(recovery=False, feature_paths=False)])
+        self.setup_stub(base)
+        stage = mol.retrospective(mol.read_bundle(launcher, check_sources=False))["stages"][0]
+        self.assertEqual(stage["status"], "unavailable")
+        self.assertIn("no Specstride feature path", stage["reason"])
+
+    def test_retro_command_exits_zero_and_names_the_file(self) -> None:
+        base, launcher = self.repository([specstride_stage(recovery=False)])   # evidence still names it
+        self.setup_stub(base, STUB_NO_EVALUATE="1")
+        result = subprocess.run([sys.executable, str(SCRIPTS / "supervise.py"), "retro", "--launcher",
+                                 str(launcher)], capture_output=True, text=True, check=False,
+                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[MOL-RETRO]", result.stdout)
+        self.assertIn("status=unavailable", result.stdout)
+        self.assertIn("retrospectives/", result.stdout)
