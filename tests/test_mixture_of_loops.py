@@ -522,6 +522,97 @@ class MixtureOfLoopsTests(unittest.TestCase):
             self.assertIn('"specstride" "run"', planned.stdout)
             self.assertNotIn("[WARN]", planned.stderr)
 
+    # ── Specstride's learning mode is declared by the stage, never inherited ────
+    def _launch_learning(self, repository: Path, stage_env: dict | None,
+                         inherited: dict[str, str]) -> dict:
+        contract, environment = self._alias_fixture(repository, "specstride")
+        value = json.loads(contract.read_text())
+        if stage_env is None:
+            value["stages"][0]["action"].pop("env")
+        else:
+            value["stages"][0]["action"]["env"] = stage_env
+        contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        environment.update(inherited)
+        launcher = repository / "run-007.sh"
+        rendered = self._run_env(environment, sys.executable, SCRIPTS / "render_launcher.py",
+                                 "--contract", contract, "--output", launcher, cwd=repository)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        executed = self._run_env(environment, launcher, "--no-color", cwd=repository)
+        self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+        return json.loads((repository / "invocation.json").read_text())["env"]
+
+    def test_an_inherited_learning_mode_never_reaches_a_specstride_stage(self) -> None:
+        inherited = {"SPECSTRIDE_LEARNING": "apply", "WIGGUM_LEARNING": "apply"}
+        with tempfile.TemporaryDirectory() as temporary:
+            env = self._launch_learning(Path(temporary), {"SPECSTRIDE_AGENT_STREAM": "true"}, inherited)
+            self.assertEqual(env["SPECSTRIDE_LEARNING"], "off")
+            self.assertNotIn("WIGGUM_LEARNING", env)
+        with tempfile.TemporaryDirectory() as temporary:
+            env = self._launch_learning(Path(temporary), None, inherited)   # a stage with no env at all
+            self.assertEqual(env["SPECSTRIDE_LEARNING"], "off")
+            self.assertNotIn("WIGGUM_LEARNING", env)
+
+    def test_a_declared_learning_mode_is_what_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env = self._launch_learning(Path(temporary), {"SPECSTRIDE_LEARNING": "suggest"},
+                                        {"SPECSTRIDE_LEARNING": "apply"})
+            self.assertEqual(env["SPECSTRIDE_LEARNING"], "suggest")
+        with tempfile.TemporaryDirectory() as temporary:   # the legacy key is normalized, then honoured
+            env = self._launch_learning(Path(temporary), {"WIGGUM_LEARNING": "apply"}, {})
+            self.assertEqual(env["SPECSTRIDE_LEARNING"], "apply")
+
+    def test_resolve_env_strips_the_learning_mode_for_checks_and_defaults_only_stages(self) -> None:
+        sys.path.insert(0, str(SCRIPTS))
+        try:
+            import runtime
+        finally:
+            sys.path.remove(str(SCRIPTS))
+        base = {"PATH": "/bin", "SPECSTRIDE_LEARNING": "apply", "WIGGUM_LEARNING": "apply"}
+        self.assertEqual(runtime.resolve_env(None, base), {"PATH": "/bin"})   # a command_success check
+        self.assertEqual(runtime.resolve_env({"X": "1"}, base, kind="command"), {"PATH": "/bin", "X": "1"})
+        self.assertEqual(runtime.resolve_env(None, base, kind="specstride"),
+                         {"PATH": "/bin", "SPECSTRIDE_LEARNING": "off"})
+
+    def _validate_learning(self, repository: Path, env: dict,
+                           extra_source: str | None = None) -> subprocess.CompletedProcess[str]:
+        contract, environment = self._alias_fixture(repository, "specstride")
+        value = json.loads(contract.read_text())
+        value["stages"][0]["action"]["env"] = env
+        if extra_source is not None:
+            path = repository / extra_source
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+            value["sources"].append({"path": extra_source, "kind": "state", "sha256": digest(path)})
+        contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        return self._run_env(environment, sys.executable, SCRIPTS / "validate_contract.py",
+                             contract, cwd=repository)
+
+    def test_validation_accepts_the_three_learning_modes_and_rejects_anything_else(self) -> None:
+        for mode in ("off", "suggest", "apply"):
+            with tempfile.TemporaryDirectory() as temporary:
+                result = self._validate_learning(Path(temporary), {"SPECSTRIDE_LEARNING": mode})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._validate_learning(Path(temporary), {"SPECSTRIDE_LEARNING": "on"})
+            self.assertEqual(result.returncode, 20, result.stdout + result.stderr)
+            self.assertIn("must be one of off, suggest, apply", result.stdout + result.stderr)
+
+    def test_validation_rejects_a_learning_mode_from_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._validate_learning(
+                Path(temporary), {"SPECSTRIDE_LEARNING": {"from_env": "MY_MODE", "required": False}})
+            self.assertEqual(result.returncode, 20, result.stdout + result.stderr)
+            self.assertIn("must be a literal, not from_env", result.stdout + result.stderr)
+
+    def test_validation_rejects_learning_state_as_a_contract_source(self) -> None:
+        for state in (".specstride", ".wiggum"):
+            with tempfile.TemporaryDirectory() as temporary:
+                result = self._validate_learning(Path(temporary), {},
+                                                 f"{state}/features/007/learning/phase-3.json")
+                self.assertEqual(result.returncode, 20, result.stdout + result.stderr)
+                self.assertIn("is Specstride learning state", result.stdout + result.stderr)
+                self.assertIn("exit 23", result.stdout + result.stderr)
+
     def test_state_paths_follow_the_legacy_state_dir_when_only_it_exists(self) -> None:
         sys.path.insert(0, str(SCRIPTS))
         try:

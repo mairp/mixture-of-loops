@@ -24,6 +24,9 @@ from typing import Any
 
 from contract_lib import (
     CURRENT_KIND,
+    LEARNING_DEFAULT,
+    LEARNING_ENV,
+    LEGACY_LEARNING_ENV,
     LEGACY_STATE_DIRNAME,
     STATE_DIRNAME,
     ContractError,
@@ -106,8 +109,20 @@ def atomic_json(path: Path, value: dict) -> None:
         raise
 
 
-def resolve_env(specification: object, base: dict[str, str] | None = None) -> dict[str, str]:
+def resolve_env(specification: object, base: dict[str, str] | None = None,
+                kind: str | None = None) -> dict[str, str]:
     environment = dict(os.environ if base is None else base)
+    # A child never inherits Specstride's learning mode: only the contract may set it,
+    # so the contract says what runs. Stripped before the early return, so a stage or
+    # a command_success check with no `env` is cleaned too. check_condition's
+    # `env_set` still reads os.environ directly, so a contract can observe an
+    # inherited value but never pass it to a child.
+    environment.pop(LEARNING_ENV, None)
+    environment.pop(LEGACY_LEARNING_ENV, None)
+    if kind == CURRENT_KIND:
+        # Unset means off, passed explicitly: Specstride re-asserts an exported value
+        # over a .env in its checkout, but not an absent one.
+        environment[LEARNING_ENV] = LEARNING_DEFAULT
     if specification is None:
         return environment
     if not isinstance(specification, dict):
@@ -322,7 +337,7 @@ def run_action(action: dict, cwd: Path, kind: str, reporter: Reporter) -> tuple[
     master: int | None = None
     slave: int | None = None
     try:
-        environment = resolve_env(action.get("env"))
+        environment = resolve_env(action.get("env"), kind=kind)
         use_pty = kind == CURRENT_KIND and reporter.color and not sys.stdout.isatty()
         capture_plain = kind == CURRENT_KIND and not reporter.color
         stdout: object = None

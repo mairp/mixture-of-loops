@@ -83,6 +83,13 @@ local support includes `--spec-format speckit-tasks`, `--feature`, `--proposer`,
 budget controls. `specstride resume` restores saved configuration, but persist explicit
 overrides in the resume argv rather than assuming every environment setting was saved.
 
+Declare Specstride's learning mode in each `specstride` stage's `env` when it should be
+anything but `off`: `"SPECSTRIDE_LEARNING": "suggest"` or `"apply"`, as a literal. The
+runtime strips any inherited value and passes `off` to a stage that declares nothing, so
+the mode in the contract is the mode that runs. Never register a file under Specstride's
+`learning/` directory as a contract source; validation rejects it (see the contract
+reference).
+
 Specstride exit `4` covers wall budget, iteration exhaustion, and consecutive proposer errors.
 Only retry it when the newest correlated event records an allowed `run_stop.reason`. Exit
 `6` is an intentional stop and must remain stopped. Exit `5` means another run owns the

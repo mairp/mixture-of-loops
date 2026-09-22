@@ -45,6 +45,14 @@ DEFAULT_MAX_RELAUNCHES = 2
 MAX_RELAUNCHES = 5
 DEFAULT_TIMEOUT_SECONDS = 3600
 AUTO_KEYS = {"max_relaunches", "wall_clock_seconds"}
+# Specstride's learning mode. A `specstride` stage declares it in its own `env`; the
+# runtime never lets an inherited value through (see runtime.resolve_env), and an
+# undeclared mode runs as `off`. `from_env` is refused for it: a reference would
+# re-open exactly the hole that stripping the inherited value closes.
+LEARNING_ENV = "SPECSTRIDE_LEARNING"
+LEGACY_LEARNING_ENV = LEGACY_ENV_PREFIX + "LEARNING"
+LEARNING_MODES = ("off", "suggest", "apply")
+LEARNING_DEFAULT = "off"
 SENSITIVE_ENV = re.compile(r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:$|_)", re.I)
 
 
@@ -86,6 +94,17 @@ def _inside(path: Path, roots: list[Path]) -> bool:
     return False
 
 
+def _is_learning_state(path: Path) -> bool:
+    """True for a path under a `learning/` directory of a Specstride state tree. Both
+    state-dir spellings match literally: source paths do not go through
+    runtime.path_for's state-dir swap."""
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if part in (STATE_DIRNAME, LEGACY_STATE_DIRNAME) and "learning" in parts[index + 1:-1]:
+            return True
+    return False
+
+
 def _validate_action(action: object, label: str, errors: list[str]) -> None:
     _require(isinstance(action, dict), f"{label} must be an object", errors)
     if not isinstance(action, dict):
@@ -116,6 +135,16 @@ def _validate_action(action: object, label: str, errors: list[str]) -> None:
             _require(valid, f"{label}.env.{key} must be a string or from_env reference", errors)
             if isinstance(key, str) and isinstance(value, str) and SENSITIVE_ENV.search(key):
                 _require(False, f"{label}.env.{key} must use from_env; literal secrets are forbidden", errors)
+            if key == LEGACY_LEARNING_ENV:
+                _require(False, f"{label}.env.{key} cannot sit beside {LEARNING_ENV}; declare {LEARNING_ENV} only",
+                         errors)
+            if key == LEARNING_ENV:
+                _require(isinstance(value, str),
+                         f"{label}.env.{key} must be a literal, not from_env: an inherited learning mode "
+                         "is exactly what the runtime strips", errors)
+                if isinstance(value, str):
+                    _require(value in LEARNING_MODES,
+                             f"{label}.env.{key} must be one of {', '.join(LEARNING_MODES)}", errors)
 
 
 def _validate_check(
@@ -418,6 +447,10 @@ def validate_contract(
                 if roots:
                     _require(_inside(resolve_path(path, root), roots),
                              f"{label}.path escapes authorized_roots", errors)
+                _require(not _is_learning_state(resolve_path(path, root)),
+                         f"{label}.path is Specstride learning state: learning/phase-<N>.json is rewritten "
+                         "at every approved phase, so hashing it would refuse every relaunch (exit 23)",
+                         errors)
 
     stages = contract.get("stages")
     _require(isinstance(stages, list), "stages must be an array", errors)

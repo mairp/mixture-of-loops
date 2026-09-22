@@ -12,7 +12,10 @@ The launch contract is pipeline data. It does not replace Specstride's verificat
 - `status`: `draft` or `validated`.
 - `repository.root`: absolute repository root used to resolve relative paths.
 - `authorized_roots`: absolute roots under which stage working directories may resolve.
-- `sources`: relative or absolute source paths with SHA-256 digests and kinds.
+- `sources`: relative or absolute source paths with SHA-256 digests and kinds. A path
+  under a `learning/` directory of a `.specstride/` or legacy state tree is rejected:
+  Specstride rewrites `learning/phase-<N>.json` at every approved phase, so hashing it would
+  refuse every relaunch with exit 23.
 - `coverage`: execution obligations with source, classification, disposition, mappings,
   rationale, and evidence expectation.
 - `findings`: findings with `severity`, `status`, provenance, and resolution.
@@ -80,6 +83,19 @@ and `WIGGUM_LIVE=false`, so older checkouts behave the same.
 `action.argv` and `resume.argv` are arrays executed without a shell. Environment values are
 literal strings or references to an existing variable. Secret references are resolved only
 for execution and are redacted from output and state.
+
+Specstride's learning mode is declared, never inherited. The runtime removes
+`SPECSTRIDE_LEARNING`, and its legacy spelling, from the environment every stage action and
+every `command_success` check inherits, and passes `SPECSTRIDE_LEARNING=off` explicitly to
+each `specstride` stage whose `env` does not declare it. A stage that wants another mode
+writes it as a literal: `"SPECSTRIDE_LEARNING": "suggest"` or `"apply"`. Validation rejects
+any other value, and rejects a `from_env` reference for this variable, because a reference
+would pass the operator's shell value through and re-open the gap the strip closes: a
+learning mode that the contract, and so its digest, does not record. The value is passed
+explicitly rather than left unset because Specstride re-asserts an exported variable over a
+`.env` in its checkout, and does not protect an absent one. An `env_set` check still reads
+the harness's own environment, so a contract can observe an inherited value but never hand
+it to a child.
 
 Supported checks are:
 
