@@ -208,6 +208,62 @@ def select_mode(request: str, tokens: Iterable[str] | None = None) -> ModeDecisi
     return ModeDecision("generate", "default", "", implement, smoke)
 
 
+# Specstride's learning mode for the stages, read from the request the same way the
+# execution mode is. `off` is the default and `apply` is never inferred from a vague
+# wish: it takes an explicit phrase about using applied or learned values.
+LEARNING_TOKENS = {"--learning-off": "off", "--learning-suggest": "suggest", "--learning-apply": "apply"}
+_LEARNING_OFF = (
+    r"\b(?:no|without|disable|turn\s+off|skip)\s+(?:the\s+)?(?:learning|self[- ]improv\w*|self[- ]tun\w*)",
+    r"\blearning\s*(?:=|:|mode\s+)?\s*off\b",
+)
+_LEARNING_APPLY = (
+    r"\blearning\s*(?:=|:|mode\s+)?\s*apply\b",
+    r"\bapply\s+(?:the\s+)?(?:learned|learnt)\b",
+    r"\buse\s+(?:the\s+)?(?:learned|learnt|applied)\s+(?:values?|settings?|decisions?|timeouts?|knobs?)\b",
+    r"\bwith\s+(?:the\s+)?(?:applied|learned)\s+(?:decisions?|values?|settings?)\b",
+)
+_LEARNING_SUGGEST = (
+    r"\blearning\s*(?:=|:|mode\s+)?\s*suggest\b",
+    r"\b(?:enable|turn\s+on|with)\s+(?:the\s+)?learning\b",
+    r"\bself[- ]improv\w*",
+    r"\bself[- ]tun\w*",
+    r"\blearn\s+from\s+(?:the\s+|this\s+|its\s+|previous\s+|past\s+)?runs?\b",
+    r"\brecord\s+(?:the\s+)?observations?\b",
+)
+
+
+@dataclass
+class LearningDecision:
+    mode: str
+    source: str          # token | refusal | prose | default
+    evidence: str
+
+    def message(self) -> str:
+        return (f"[MOL-LEARNING] mode={self.mode} source={self.source} "
+                f"evidence={json.dumps(self.evidence)}")
+
+
+def select_learning_mode(request: str, tokens: Iterable[str] | None = None) -> LearningDecision:
+    """The SPECSTRIDE_LEARNING every specstride stage declares. `off` unless asked;
+    an explicit token wins over prose, and a refusal wins over any request to learn."""
+    words = list(tokens) if tokens is not None else []
+    words += re.findall(r"(?<!\S)--[a-z-]+", request or "")
+    for token in words:
+        if token in LEARNING_TOKENS:
+            return LearningDecision(LEARNING_TOKENS[token], "token", token)
+    text = (request or "").lower()
+    refusal = _matched(text, _LEARNING_OFF)
+    if refusal:
+        return LearningDecision("off", "refusal", refusal)
+    apply = _matched(text, _LEARNING_APPLY)
+    if apply:
+        return LearningDecision("apply", "prose", apply)
+    suggest = _matched(text, _LEARNING_SUGGEST)
+    if suggest:
+        return LearningDecision("suggest", "prose", suggest)
+    return LearningDecision("off", "default", "")
+
+
 # ── 2. launcher resolution ────────────────────────────────────────────────────
 
 @dataclass

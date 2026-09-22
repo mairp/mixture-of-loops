@@ -6,6 +6,7 @@ specific hook, subagent, scheduler or tool name, so a harness with only `read` a
 `bash` can drive the whole execution path.
 
     supervise.py mode     --request TEXT [--token TOK ...]
+    supervise.py learning --request TEXT [--token TOK ...]
     supervise.py resolve  --repo DIR [--feature SLUG] [--launcher PATH]
     supervise.py gate     --launcher PATH [--implement] [--smoke]
     supervise.py launch   --launcher PATH [--mode run|auto] [--implement] [--smoke]
@@ -66,6 +67,16 @@ def command_mode(args: argparse.Namespace) -> int:
     emit(decision.message())
     if decision.mode == "generate":
         emit('[MOL-NEXT] next="generation only; offer `run` once the launcher exists"')
+    return 0
+
+
+def command_learning(args: argparse.Namespace) -> int:
+    decision = mol.select_learning_mode(args.request, args.token)
+    emit(decision.message())
+    if decision.mode == "apply":
+        emit('[MOL-NEXT] next="bootstrap with --learning-mode apply; if it emits no '
+             'configuration.learning block there are no applied decisions to bind: use suggest '
+             'and say so"')
     return 0
 
 
@@ -212,6 +223,12 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--token", action="append", default=[],
                       help="an explicit invocation token; repeatable")
     mode.set_defaults(handler=command_mode)
+
+    learning = subparsers.add_parser("learning", help="read Specstride's learning mode from a request")
+    learning.add_argument("--request", default="", help="the request text, verbatim")
+    learning.add_argument("--token", action="append", default=[],
+                          help="an explicit invocation token (--learning-off|-suggest|-apply); repeatable")
+    learning.set_defaults(handler=command_learning)
 
     resolve = subparsers.add_parser("resolve", help="find the launcher a run would use")
     resolve.add_argument("--repo", required=True)

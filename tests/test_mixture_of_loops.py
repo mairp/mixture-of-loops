@@ -558,8 +558,8 @@ class MixtureOfLoopsTests(unittest.TestCase):
                                         {"SPECSTRIDE_LEARNING": "apply"})
             self.assertEqual(env["SPECSTRIDE_LEARNING"], "suggest")
         with tempfile.TemporaryDirectory() as temporary:   # the legacy key is normalized, then honoured
-            env = self._launch_learning(Path(temporary), {"WIGGUM_LEARNING": "apply"}, {})
-            self.assertEqual(env["SPECSTRIDE_LEARNING"], "apply")
+            env = self._launch_learning(Path(temporary), {"WIGGUM_LEARNING": "suggest"}, {})
+            self.assertEqual(env["SPECSTRIDE_LEARNING"], "suggest")
 
     def test_resolve_env_strips_the_learning_mode_for_checks_and_defaults_only_stages(self) -> None:
         sys.path.insert(0, str(SCRIPTS))
@@ -588,10 +588,14 @@ class MixtureOfLoopsTests(unittest.TestCase):
                              contract, cwd=repository)
 
     def test_validation_accepts_the_three_learning_modes_and_rejects_anything_else(self) -> None:
-        for mode in ("off", "suggest", "apply"):
+        for mode in ("off", "suggest"):
             with tempfile.TemporaryDirectory() as temporary:
                 result = self._validate_learning(Path(temporary), {"SPECSTRIDE_LEARNING": mode})
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with tempfile.TemporaryDirectory() as temporary:   # apply needs bound decisions (item 6)
+            result = self._validate_learning(Path(temporary), {"SPECSTRIDE_LEARNING": "apply"})
+            self.assertEqual(result.returncode, 20, result.stdout + result.stderr)
+            self.assertIn("needs a configuration.learning block", result.stdout + result.stderr)
         with tempfile.TemporaryDirectory() as temporary:
             result = self._validate_learning(Path(temporary), {"SPECSTRIDE_LEARNING": "on"})
             self.assertEqual(result.returncode, 20, result.stdout + result.stderr)
