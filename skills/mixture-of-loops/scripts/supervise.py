@@ -13,6 +13,7 @@ specific hook, subagent, scheduler or tool name, so a harness with only `read` a
     supervise.py observe  (--launcher PATH | --run-dir DIR) [--json]
     supervise.py auto     --launcher PATH [--mode run|auto] [--implement] [--smoke]
     supervise.py stop     (--launcher PATH | --run-dir DIR)
+    supervise.py retro    (--launcher PATH | --run-dir DIR)
 
 `auto` is gate, launch and watch in one call, for a harness that supervises inside its
 own turn. `observe` is the same reporting for a harness that schedules its own wake-ups.
@@ -147,6 +148,37 @@ def command_stop(args: argparse.Namespace) -> int:
     return mol.exit_status(status)
 
 
+def command_retro(args: argparse.Namespace) -> int:
+    """Read-only retrospective: what Specstride's learning layer says about each
+    specstride stage, written to runs/<id>/retrospectives/<contract-digest>.json.
+    It may suggest `specstride learn --revert`; it never applies or reverts, and it
+    writes nothing outside the run dir. Unavailable data is reported, not fatal."""
+    if getattr(args, "run_dir", None):
+        record = mol.load_record(Path(args.run_dir).resolve())
+        bundle, run_dir = _bundle_for(record), Path(record["run_dir"])
+    else:
+        bundle = mol.read_bundle(Path(args.launcher).resolve(), check_sources=False)
+        run_dir = bundle.run_dir
+    out = _emitter(run_dir if run_dir.is_dir() else None)
+    if bundle is None:
+        out('[MOL-RETRO] status=unavailable reason="the contract behind the launcher cannot be read"')
+        return 0
+    document = mol.retrospective(bundle)
+    path = mol.write_retrospective(run_dir, document)
+    if not document["stages"]:
+        out(f'[MOL-RETRO] pipeline={bundle.pipeline} status=unavailable reason="no specstride stage" '
+            f"path={path}")
+    for stage in document["stages"]:
+        detail = stage.get("reason") or f"{len(stage.get('evaluations') or [])} evaluation line(s)"
+        out(f"[MOL-RETRO] pipeline={bundle.pipeline} stage={stage['stage']} status={stage['status']} "
+            f"detail={json.dumps(detail)} path={path}")
+        for line in stage.get("evaluations") or []:
+            out(f"[MOL-RETRO]   {line}")
+        for suggestion in stage.get("suggestions") or []:
+            out(f"[MOL-NEXT] suggestion (not run): {suggestion}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -220,6 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
     with_target(stop)
     with_cadence(stop)
     stop.set_defaults(handler=command_stop)
+
+    retro = subparsers.add_parser("retro", help="read-only retrospective of the pipeline's learning state")
+    with_target(retro)
+    retro.set_defaults(handler=command_retro)
     return parser
 
 

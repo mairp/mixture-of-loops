@@ -26,6 +26,9 @@ import time
 from typing import Callable, Iterable
 
 from contract_lib import (
+    CURRENT_KIND,
+    LEGACY_STATE_DIRNAME,
+    STATE_DIRNAME,
     ContractError,
     StaleSourceError,
     artifact_root,
@@ -35,7 +38,7 @@ from contract_lib import (
     validate_contract,
 )
 from render_launcher import existing_launcher_is_intact
-from runtime import atomic_json, latest_reason, semantic_contract_digest
+from runtime import atomic_json, latest_reason, path_for, resolve_env, semantic_contract_digest
 
 
 # ── launcher exit codes, mirrored from runtime.py ─────────────────────────────
@@ -1217,3 +1220,104 @@ def exit_status(status: str) -> int:
 if __name__ == "__main__":  # pragma: no cover - the CLI lives in supervise.py
     print("supervisor_lib is a library; run supervise.py", file=sys.stderr)
     raise SystemExit(2)
+
+
+# ── 8. retrospective (read-only) ──────────────────────────────────────────────
+RETRO_SCHEMA = "mol.retrospective/1"
+RETRO_TIMEOUT_SECONDS = 120
+_FEATURE_PATH = re.compile(r"(?:^|/)(%s|%s)/features/([^/]+)"
+                           % (re.escape(STATE_DIRNAME), re.escape(LEGACY_STATE_DIRNAME)))
+_EVALUATED_ID = re.compile(r"\[(learn-[0-9a-f]+|[A-Za-z0-9_.:-]+)\]: regressed\b")
+
+
+def stage_feature_dir(stage: dict, root: Path) -> tuple[Path, Path, str] | None:
+    """(workdir, feature dir, slug) of a specstride stage, from the first of its
+    recovery.reason.jsonl, evidence[0], or a postcondition path that names a
+    Specstride state tree. No contract field names the state dir, and a stage
+    without recovery.reason is normal, so all three may be absent: None."""
+    cwd = resolve_path(stage.get("cwd", "."), root)
+    reason = (stage.get("recovery") or {}).get("reason")
+    candidates: list[str] = []
+    if isinstance(reason, dict) and isinstance(reason.get("jsonl"), str):
+        candidates.append(reason["jsonl"])
+    evidence = stage.get("evidence") or []
+    if evidence and isinstance(evidence[0], str):
+        candidates.append(evidence[0])
+    for check in stage.get("postconditions") or []:
+        if isinstance(check, dict) and isinstance(check.get("path"), str):
+            candidates.append(check["path"])
+    for value in candidates:
+        match = _FEATURE_PATH.search(value)
+        if not match:
+            continue
+        # path_for applies Specstride's own state-dir rule (.specstride/, unless
+        # only the legacy dir exists in that workdir)
+        prefix = value[:match.end()]
+        feature_dir = path_for(prefix, cwd)
+        return feature_dir.parent.parent.parent, feature_dir, match.group(2)
+    return None
+
+
+def _run_learn(argv0: str, workdir: Path, slug: str, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run([argv0, "learn", "-w", str(workdir), "--feature", slug, *extra],
+                          cwd=str(workdir), env=resolve_env(None), stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=RETRO_TIMEOUT_SECONDS, check=False)
+
+
+def stage_retrospective(stage: dict, root: Path) -> dict:
+    """What Specstride's own learning layer says about one stage's feature, read
+    through `specstride learn --summarize` / `--evaluate` (both read-only). Any
+    failure, including a Specstride without those flags, is `unavailable`."""
+    entry: dict = {"stage": stage.get("id"), "status": "unavailable"}
+    located = stage_feature_dir(stage, root)
+    if located is None:
+        return dict(entry, reason="no Specstride feature path in recovery.reason, evidence or postconditions")
+    workdir, feature_dir, slug = located
+    entry.update(workdir=str(workdir), feature_dir=str(feature_dir), feature=slug)
+    argv = (stage.get("action") or {}).get("argv") or []
+    argv0 = argv[0] if argv and isinstance(argv[0], str) else CURRENT_KIND
+    try:
+        for flag in ("--summarize", "--evaluate"):
+            probe = _run_learn(argv0, workdir, slug, flag, "--help")
+            if probe.returncode != 0:
+                return dict(entry, reason=f"`{argv0} learn {flag}` is not supported by this Specstride")
+        summary = _run_learn(argv0, workdir, slug, "--summarize")
+        if summary.returncode != 0:
+            return dict(entry, reason=f"`learn --summarize` exited {summary.returncode}")
+        document = json.loads(summary.stdout)
+        evaluated = _run_learn(argv0, workdir, slug, "--evaluate")
+        if evaluated.returncode != 0:
+            return dict(entry, reason=f"`learn --evaluate` exited {evaluated.returncode}")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return dict(entry, reason=f"{type(exc).__name__}: {exc}")
+    lines = [line for line in evaluated.stdout.splitlines() if line.strip()]
+    suggestions = sorted({f"{argv0} learn -w {workdir} --feature {slug} --revert {m.group(1)}"
+                          for line in lines for m in [_EVALUATED_ID.search(line)] if m})
+    phases = document.get("phases") or {}
+    return dict(entry, status="ok", summary_schema=document.get("schema"),
+                totals=document.get("totals"),
+                phases={key: {name: value.get(name) for name in
+                              ("title", "attempts_total", "attempts_to_approval", "cost_usd",
+                               "work_sec_p50", "work_sec_p90", "work_sec_samples")}
+                        for key, value in phases.items() if isinstance(value, dict)},
+                evaluations=lines, suggestions=suggestions)
+
+
+def retrospective(bundle: Bundle) -> dict:
+    """The read-only retrospective of a supervised pipeline, keyed to its contract
+    digest. It may suggest `specstride learn --revert`; it never applies or reverts."""
+    root = Path(bundle.contract["repository"]["root"]).resolve()
+    stages = [stage_retrospective(stage, root) for stage in bundle.contract.get("stages", [])
+              if isinstance(stage, dict) and stage.get("kind") == CURRENT_KIND]
+    return {"schema": RETRO_SCHEMA, "pipeline": bundle.pipeline, "contract_digest": bundle.digest,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "stages": stages}
+
+
+def write_retrospective(run_dir: Path, document: dict) -> Path:
+    """runs/<id> is keyed on the pipeline and reused across relaunches and
+    re-derivations, so each retrospective is filed under its contract digest."""
+    directory = run_dir / "retrospectives"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{document['contract_digest']}.json"
+    atomic_json(path, document)
+    return path
