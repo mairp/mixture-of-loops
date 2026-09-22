@@ -143,6 +143,12 @@ from every child's environment and passes `off` unless the stage's own `env` dec
 `suggest` or `apply`, so an `apply` left in the operator's shell cannot change a run the
 contract does not describe.
 
+A contract may also bind Specstride's learned decisions: `configuration.learning` records the
+mode, the last decision it binds (`decisions_through`, passed to each stage as
+`SPECSTRIDE_LEARNING_THROUGH`), a hash of the decision log up to it, the values in effect, and
+the log's path. Later decisions wait for a re-derivation; if the bound part of the log itself
+changes, the gate and the relaunch classifier refuse with `learning-decisions-changed`.
+
 The supervisor only ever reads the run's state: it never edits `state.json`, removes a
 lock, or deletes a run directory. Progress comes from telemetry alone — never from the
 model's narration — and a run is never reported as complete without both a terminal

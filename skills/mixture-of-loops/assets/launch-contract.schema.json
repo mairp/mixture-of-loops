@@ -64,6 +64,19 @@
             "max_relaunches": {"type": "integer", "minimum": 0, "maximum": 5},
             "wall_clock_seconds": {"type": "number", "exclusiveMinimum": 0}
           }
+        },
+        "learning": {
+          "$comment": "Optional binding of Specstride's decision log (learning/applied.json). Only the prefix through decisions_through is bound; validate_contract.py re-hashes it when checking sources, and every specstride stage must declare SPECSTRIDE_LEARNING = mode and SPECSTRIDE_LEARNING_THROUGH = decisions_through as literals in its env.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "decisions_through", "decisions_sha256", "effective", "source_path"],
+          "properties": {
+            "mode": {"enum": ["off", "suggest", "apply"]},
+            "decisions_through": {"type": "string", "minLength": 1},
+            "decisions_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "effective": {"type": "object", "additionalProperties": {"type": "object"}},
+            "source_path": {"type": "string", "minLength": 1}
+          }
         }
       }
     },

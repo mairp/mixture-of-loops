@@ -53,6 +53,10 @@ LEARNING_ENV = "SPECSTRIDE_LEARNING"
 LEGACY_LEARNING_ENV = LEGACY_ENV_PREFIX + "LEARNING"
 LEARNING_MODES = ("off", "suggest", "apply")
 LEARNING_DEFAULT = "off"
+# configuration.learning binds a prefix of Specstride's decision log into the contract
+# (see _validate_learning): which decisions a run may act on, and a hash of them.
+LEARNING_THROUGH_ENV = "SPECSTRIDE_LEARNING_THROUGH"
+LEARNING_KEYS = {"mode", "decisions_through", "decisions_sha256", "effective", "source_path"}
 SENSITIVE_ENV = re.compile(r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:$|_)", re.I)
 
 
@@ -62,6 +66,10 @@ class ContractError(Exception):
 
 class StaleSourceError(ContractError):
     pass
+
+
+class LearningDecisionsChanged(StaleSourceError):
+    """The decision-log prefix configuration.learning bound no longer hashes the same."""
 
 
 def load_contract(path: str | os.PathLike[str]) -> dict:
@@ -138,6 +146,9 @@ def _validate_action(action: object, label: str, errors: list[str]) -> None:
             if key == LEGACY_LEARNING_ENV:
                 _require(False, f"{label}.env.{key} cannot sit beside {LEARNING_ENV}; declare {LEARNING_ENV} only",
                          errors)
+            if key == LEARNING_THROUGH_ENV:
+                _require(isinstance(value, str) and bool(value),
+                         f"{label}.env.{key} must be a literal run id, not from_env", errors)
             if key == LEARNING_ENV:
                 _require(isinstance(value, str),
                          f"{label}.env.{key} must be a literal, not from_env: an inherited learning mode "
@@ -265,6 +276,111 @@ def auto_budget(contract: dict) -> dict:
         "declared_pipeline_seconds": pipeline,
         "source": "declared" if block is not None else "default",
     }
+
+
+def learning_prefix(path: Path, through: str) -> bytes | None:
+    """The bytes of a Specstride applied.json up to and including the line whose
+    run_id is `through`, or None when no line names it."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    end = 0
+    for line in data.splitlines(keepends=True):
+        end += len(line)
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("run_id") == through:
+            return data[:end]
+    return None
+
+
+def learning_effective(prefix: bytes) -> dict:
+    """{knob: {phase: value}} in effect at the end of a decision-log prefix: the
+    last apply/revert per (knob, phase, shape), keeping the applies still active."""
+    latest: dict = {}
+    for line in prefix.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("action") not in (None, "apply", "revert"):
+            continue
+        latest[(entry.get("knob"), str(entry.get("phase")), entry.get("shape"))] = entry
+    effective: dict = {}
+    for (knob, phase, _shape), entry in latest.items():
+        if entry.get("action") in (None, "apply") and isinstance(knob, str):
+            effective.setdefault(knob, {})[phase] = entry.get("value")
+    return effective
+
+
+def learning_binding_problem(contract: dict) -> str | None:
+    """Why the bound decision-log prefix no longer matches, or None when it does
+    (or the contract binds none)."""
+    configuration = contract.get("configuration")
+    block = configuration.get("learning") if isinstance(configuration, dict) else None
+    if not isinstance(block, dict):
+        return None
+    root = Path(str((contract.get("repository") or {}).get("root", "/")))
+    path = resolve_path(str(block.get("source_path", "")), root)
+    prefix = learning_prefix(path, str(block.get("decisions_through", "")))
+    if prefix is None:
+        return (f"configuration.learning: {path} no longer holds decision "
+                f"{block.get('decisions_through')!r}")
+    if hashlib.sha256(prefix).hexdigest() != block.get("decisions_sha256"):
+        return (f"configuration.learning: the decisions in {path} up to "
+                f"{block.get('decisions_through')!r} changed since derivation")
+    return None
+
+
+def _validate_learning(configuration: object, contract: dict, errors: list[str]) -> None:
+    """configuration.learning is optional. When present it is the provenance record of
+    the learning mode every specstride stage declares: the stages' literal
+    SPECSTRIDE_LEARNING and SPECSTRIDE_LEARNING_THROUGH must match it."""
+    block = configuration.get("learning") if isinstance(configuration, dict) else None
+    stages = [stage for stage in contract.get("stages") or []
+              if isinstance(stage, dict) and stage.get("kind") == CURRENT_KIND]
+    actions = [(stage.get("id"), name, stage.get(name)) for stage in stages
+               for name in ("action", "resume") if isinstance(stage.get(name), dict)]
+    if block is None:
+        for stage_id, name, action in actions:
+            env = action.get("env") or {}
+            _require(not (isinstance(env, dict) and LEARNING_THROUGH_ENV in env),
+                     f"stage {stage_id}.{name}.env.{LEARNING_THROUGH_ENV} needs a configuration.learning "
+                     "block recording what it binds", errors)
+        return
+    label = "configuration.learning"
+    _require(isinstance(block, dict), f"{label} must be an object", errors)
+    if not isinstance(block, dict):
+        return
+    _require(set(block) == LEARNING_KEYS,
+             f"{label} must have exactly {', '.join(sorted(LEARNING_KEYS))}", errors)
+    _require(block.get("mode") in LEARNING_MODES,
+             f"{label}.mode must be one of {', '.join(LEARNING_MODES)}", errors)
+    _require(isinstance(block.get("decisions_through"), str) and bool(block.get("decisions_through")),
+             f"{label}.decisions_through must be a run id", errors)
+    digest = block.get("decisions_sha256")
+    _require(isinstance(digest, str) and bool(re.fullmatch(r"[0-9a-f]{64}", digest)),
+             f"{label}.decisions_sha256 must be lowercase SHA-256", errors)
+    source = block.get("source_path")
+    _require(isinstance(source, str) and bool(source) and not Path(source).is_absolute(),
+             f"{label}.source_path must be the applied.json path relative to repository.root", errors)
+    effective = block.get("effective")
+    _require(isinstance(effective, dict) and all(
+        isinstance(knob, str) and isinstance(phases, dict) and all(isinstance(k, str) for k in phases)
+        for knob, phases in (effective.items() if isinstance(effective, dict) else [])),
+        f"{label}.effective must map knob -> {{phase: value}}", errors)
+    for stage_id, name, action in actions:
+        env = action.get("env") or {}
+        env = env if isinstance(env, dict) else {}
+        _require(env.get(LEARNING_ENV) == block.get("mode"),
+                 f"stage {stage_id}.{name}.env.{LEARNING_ENV} must be {block.get('mode')!r}, "
+                 f"as {label}.mode records", errors)
+        _require(env.get(LEARNING_THROUGH_ENV) == block.get("decisions_through"),
+                 f"stage {stage_id}.{name}.env.{LEARNING_THROUGH_ENV} must be "
+                 f"{block.get('decisions_through')!r}, as {label}.decisions_through records", errors)
 
 
 def _validate_auto(configuration: object, contract: dict, errors: list[str]) -> None:
@@ -594,6 +710,7 @@ def validate_contract(
     _require(configuration is None or isinstance(configuration, dict),
              "configuration must be an object", errors)
     _validate_auto(configuration, contract, errors)
+    _validate_learning(configuration, contract, errors)
 
     findings = contract.get("findings")
     _require(isinstance(findings, list), "findings must be an array", errors)
@@ -625,6 +742,11 @@ def validate_contract(
         stale = check_source_hashes(contract)
         if stale:
             raise StaleSourceError("\n".join(stale))
+        # the bound prefix of the decision log, re-hashed only here: supervise.py reads
+        # bundles with check_sources=False, where the file may be absent
+        problem = learning_binding_problem(contract)
+        if problem:
+            raise LearningDecisionsChanged(problem)
     return warnings
 
 

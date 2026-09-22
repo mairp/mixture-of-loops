@@ -30,9 +30,11 @@ from contract_lib import (
     LEGACY_STATE_DIRNAME,
     STATE_DIRNAME,
     ContractError,
+    LearningDecisionsChanged,
     StaleSourceError,
     artifact_root,
     auto_budget,
+    learning_binding_problem,
     load_contract,
     resolve_path,
     validate_contract,
@@ -428,6 +430,10 @@ def gate(launcher: Path, *, implement: bool = False, smoke: bool = False,
 
     try:
         bundle = read_bundle(launcher)
+    except LearningDecisionsChanged as exc:
+        return refuse("contract-validated", "learning-decisions-changed", str(exc),
+                      "Specstride's decision log changed after derivation; re-derive so the "
+                      "contract binds (and its digest records) the decisions that will run")
     except StaleSourceError as exc:
         return refuse("contract-validated", "stale-sources", str(exc),
                       "the sources moved under the launcher; regenerate with `auto`")
@@ -970,6 +976,11 @@ def classify_relaunch(observation: Observation, record: dict, bundle: Bundle | N
         return no(False, "contract-digest-changed",
                   "the launcher now points at a different contract than the one launched; "
                   "a relaunch would silently reset the stage map")
+    # The digest cannot see this: the decision log is bound by a hashed prefix, not as a
+    # source, so a `specstride learn --apply` between relaunches is caught here instead.
+    problem = learning_binding_problem(bundle.contract) if bundle is not None else None
+    if problem:
+        return no(False, "learning-decisions-changed", problem)
     if bundle is not None and not existing_launcher_is_intact(Path(record["launcher"])):
         return no(False, "launcher-edited",
                   "the launcher changed since it was started and is no longer the "
