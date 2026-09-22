@@ -89,7 +89,8 @@ Specstride's learning mode is declared, never inherited. The runtime removes
 every `command_success` check inherits, and passes `SPECSTRIDE_LEARNING=off` explicitly to
 each `specstride` stage whose `env` does not declare it. A stage that wants another mode
 writes it as a literal: `"SPECSTRIDE_LEARNING": "suggest"` or `"apply"`. Validation rejects
-any other value, and rejects a `from_env` reference for this variable, because a reference
+any other value, rejects `apply` without a `configuration.learning` block binding the decisions
+it may use, and rejects a `from_env` reference for this variable, because a reference
 would pass the operator's shell value through and re-open the gap the strip closes: a
 learning mode that the contract, and so its digest, does not record. The value is passed
 explicitly rather than left unset because Specstride re-asserts an exported variable over a

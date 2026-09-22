@@ -91,7 +91,10 @@ the `configuration.learning` block the bootstrap emitted and expand it into ever
 `specstride` stage's `action.env` and `resume.env` at derivation time:
 `SPECSTRIDE_LEARNING` = its `mode` and `SPECSTRIDE_LEARNING_THROUGH` = its
 `decisions_through`, both literals. Validation cross-checks the literals against the block;
-the runtime injects nothing from it. Never register a file under Specstride's
+the runtime injects nothing from it. Choose the mode with `supervise.py learning` (see the
+skill's *Learning mode*): `off` by default, `suggest` when the request asks the loop to learn,
+`apply` only when it explicitly asks for learned values and the bootstrap bound a decision log
+— validation rejects `apply` without one. Never register a file under Specstride's
 `learning/` directory as a contract source; validation rejects it (see the contract
 reference).
 

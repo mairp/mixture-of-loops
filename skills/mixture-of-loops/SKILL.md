@@ -52,6 +52,36 @@ and otherwise natural phrasing in any harness ("auto", "run it", "generate and r
 launcher only when the request asked for them. `--dry-run` is never combined with `run`
 or `auto`: it is the generation gate, not an execution mode.
 
+### Learning mode
+
+Specstride's learning loop improves how it drives its agents from its own runs. The harness
+does not decide how it improves: it records one choice from the request, the
+`SPECSTRIDE_LEARNING` every `specstride` stage runs with. Read it deterministically:
+
+```text
+python3 SKILL_ROOT/scripts/supervise.py learning --request "THE REQUEST, VERBATIM"
+```
+
+| Mode | When | What the run does |
+| --- | --- | --- |
+| `off` (default) | the request says nothing about learning, or refuses it ("no learning", "without self-tuning") | nothing is observed or read |
+| `suggest` | the request asks the loop to learn or self-improve ("learn from its runs", "make it self-improving", "with learning") | records per-phase observations and evaluates decisions already applied; changes nothing it runs with |
+| `apply` | the request explicitly asks to use learned or applied values ("use the learned timeouts", "apply the learned values", `learning: apply`) | runs with the decisions the contract binds, and still evaluates and auto-reverts them |
+
+An explicit `--learning-off`, `--learning-suggest` or `--learning-apply` token wins over prose,
+and a refusal wins over any request to learn. `apply` is never inferred from a vague wish.
+Pass the mode to `bootstrap_contract.py --learning-mode MODE`. For `apply`, the bootstrap must
+emit a `configuration.learning` block, because that block is what binds the decisions the run may
+use; if it emits none, the feature has no applied decisions, so use `suggest` and say so.
+Validation rejects `apply` without the block. Write the mode, and for a bound block its
+`decisions_through` as `SPECSTRIDE_LEARNING_THROUGH`, literally into every `specstride` stage's
+`action.env` and `resume.env`. State the learning mode in the closing message beside the
+execution mode.
+
+The harness never runs `specstride learn --apply`, `--revert` or `--off`. Applying a decision is
+the operator's act; Specstride measures, evaluates and reverts on its own inside the run; and
+`supervise.py retro` may only suggest a revert.
+
 Every generated artifact belongs under `.mixture-of-loops/` at the repository root: the
 contract at `.mixture-of-loops/<feature>/launch-contract.json`, the launcher beside it,
 and the bundle and run state in the subdirectories the runtime owns. Leave nothing
@@ -76,11 +106,11 @@ an existing root-level launcher, which keeps working unchanged.
    These negations keep the contract committable, since Git does not descend into a
    wholly ignored directory. Offer plain `.mixture-of-loops/` when the user wants the
    contract ignored too.
-3. Bootstrap a provenance-bound draft:
+3. Bootstrap a provenance-bound draft, with the learning mode read above:
 
    ```text
    python3 SKILL_ROOT/scripts/bootstrap_contract.py \
-     --repo REPOSITORY --feature FEATURE_PATH --output LAUNCH_CONTRACT
+     --repo REPOSITORY --feature FEATURE_PATH --learning-mode MODE --output LAUNCH_CONTRACT
    ```
 
    Repeat `--feature` for an explicitly supplied dependent feature set. Do not broaden

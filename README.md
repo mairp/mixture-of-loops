@@ -154,7 +154,7 @@ choices when it derives the contract and afterwards only reads:
 
 | Step | Who decides | Where it shows |
 |---|---|---|
-| Learning mode (`off`, `suggest`, `apply`) | the operator, in the request; the deriving harness writes it literally into each `specstride` stage's `env` (default `off`; a value in the shell is stripped) | the contract, so its digest records it |
+| Learning mode (`off`, `suggest`, `apply`) | the operator, in the request, read deterministically by `supervise.py learning` (default `off`; `apply` only when explicitly asked, and only with bound decisions); the deriving harness writes it literally into each `specstride` stage's `env`, and a value in the shell is stripped | the contract, so its digest records it |
 | Which applied decisions the run may use | bound at derivation through `configuration.learning` (a run id and a hash of the decision log up to it) | the contract; a later `specstride learn --apply` waits for a new contract |
 | Measure, suggest, evaluate, auto-revert on a guardrail breach | Specstride itself, inside the run | the stage's `.specstride/features/<slug>/learning/` |
 | Applying a new decision | the operator, with `specstride learn --apply`; never the harness, never automatic | Specstride's `applied.json` |

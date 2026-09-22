@@ -347,9 +347,14 @@ def _validate_learning(configuration: object, contract: dict, errors: list[str])
     if block is None:
         for stage_id, name, action in actions:
             env = action.get("env") or {}
-            _require(not (isinstance(env, dict) and LEARNING_THROUGH_ENV in env),
+            env = env if isinstance(env, dict) else {}
+            _require(LEARNING_THROUGH_ENV not in env,
                      f"stage {stage_id}.{name}.env.{LEARNING_THROUGH_ENV} needs a configuration.learning "
                      "block recording what it binds", errors)
+            # apply with nothing bound would act on decisions the contract never recorded
+            _require(env.get(LEARNING_ENV) != "apply",
+                     f"stage {stage_id}.{name}.env.{LEARNING_ENV}=apply needs a configuration.learning "
+                     "block binding the decisions it may use; with no decision log, use suggest", errors)
         return
     label = "configuration.learning"
     _require(isinstance(block, dict), f"{label} must be an object", errors)

@@ -1175,3 +1175,39 @@ class LearningBindingTests(Fixture):
         block = json.loads(result.stdout)["configuration"]["learning"]
         self.assertEqual(block["mode"], "suggest")
         self.assertEqual(block["decisions_through"], "learn-aaa")
+
+
+
+# ── the learning mode a contract declares ─────────────────────────────────────
+
+class LearningModeSelectionTests(unittest.TestCase):
+    CASES = [
+        # request, tokens, mode, source
+        ("derive a pipeline for specs/007-example", [], "off", "default"),
+        ("run it and let it learn from its runs", [], "suggest", "prose"),
+        ("make the loop self-improving", [], "suggest", "prose"),
+        ("auto, with learning enabled", [], "suggest", "prose"),
+        ("auto, with learning", [], "suggest", "prose"),
+        ("run it with learning=suggest", [], "suggest", "prose"),
+        ("run it and use the learned timeouts", [], "apply", "prose"),
+        ("apply the learned values for phase 3", [], "apply", "prose"),
+        ("learning: apply", [], "apply", "prose"),
+        ("self-improving, but no learning applied yet — learning off", [], "off", "refusal"),
+        ("run it without self-tuning", [], "off", "refusal"),
+        ("use the learned values", ["--learning-suggest"], "suggest", "token"),
+        ("derive it --learning-apply", [], "apply", "token"),
+    ]
+
+    def test_the_learning_mode_is_read_deterministically(self) -> None:
+        for request, tokens, mode, source in self.CASES:
+            with self.subTest(request=request):
+                decision = mol.select_learning_mode(request, tokens)
+                self.assertEqual((decision.mode, decision.source), (mode, source), decision.message())
+
+    def test_the_cli_reports_the_mode_and_the_apply_fallback(self) -> None:
+        result = subprocess.run([sys.executable, str(SCRIPTS / "supervise.py"), "learning", "--request",
+                                 "use the learned values"], capture_output=True, text=True, check=False,
+                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[MOL-LEARNING] mode=apply source=prose", result.stdout)
+        self.assertIn("use suggest", result.stdout)
