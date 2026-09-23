@@ -20,6 +20,7 @@ from contract_lib import (
     canonical_bytes,
     load_contract,
     validate_contract,
+    warn_if_not_shell_invoked,
 )
 
 
@@ -117,6 +118,7 @@ def main() -> int:
         help="explicitly replace an existing generated launcher whose digest changed",
     )
     args = parser.parse_args()
+    warn_if_not_shell_invoked("render_launcher.py")
     try:
         contract = load_contract(args.contract)
         # Normalizes legacy spellings in place, so the bundle carries the current ones.

@@ -74,7 +74,7 @@ def render(contract: dict, repository: Path, name: str = "run-fixture.sh") -> Pa
         [sys.executable, str(SCRIPTS / "render_launcher.py"), "--contract", str(path),
          "--output", str(launcher)],
         capture_output=True, text=True, check=False,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "MOL_VIA": "shell"})
     if result.returncode != 0:
         raise AssertionError(f"render failed: {result.stdout}{result.stderr}")
     return launcher
@@ -183,6 +183,81 @@ class ModeSelectionTests(unittest.TestCase):
         line = mol.select_mode("generate and run it").message()
         self.assertTrue(line.startswith("[MOL-MODE] mode=auto source=prose "))
         self.assertIn('evidence="generate and run"', line)
+
+
+# ── the shell-cell reminder (issue #23: a wrapper loses cwd/env/quoting) ───────
+# SKILL.md's command examples (steps 3, 8, 9) export MOL_VIA=shell before the command, so
+# a real shell running the fenced block as one command line passes it to the script. A
+# notebook-style harness that re-implements the command through subprocess.run instead
+# drops the export, so the script sees it unset and reminds the model on stderr -- never
+# changing its exit code or stdout, since it cannot tell that case apart from a plain shell
+# that simply skipped the export (see contract_lib.warn_if_not_shell_invoked).
+
+class ShellMarkerReminderTests(unittest.TestCase):
+    def capture_warning(self, marker: str | None) -> str:
+        previous = os.environ.pop(contract_lib.SHELL_MARKER_ENV, None)
+        try:
+            if marker is not None:
+                os.environ[contract_lib.SHELL_MARKER_ENV] = marker
+            buffer = io.StringIO()
+            with contextlib.redirect_stderr(buffer):
+                contract_lib.warn_if_not_shell_invoked("some_script.py")
+            return buffer.getvalue()
+        finally:
+            os.environ.pop(contract_lib.SHELL_MARKER_ENV, None)
+            if previous is not None:
+                os.environ[contract_lib.SHELL_MARKER_ENV] = previous
+
+    def test_the_reminder_prints_once_without_the_marker(self) -> None:
+        text = self.capture_warning(None)
+        self.assertIn("some_script.py", text)
+        self.assertIn("MOL_VIA=shell", text)
+        self.assertIn("SKILL.md", text)
+        self.assertEqual(len(text.strip().splitlines()), 1)
+
+    def test_the_reminder_is_quiet_with_the_marker(self) -> None:
+        self.assertEqual(self.capture_warning("shell"), "")
+
+    def test_an_unrelated_value_still_reminds(self) -> None:
+        # only the exact value the %%bash examples export counts; anything else is silence
+        # from a caller that never read SKILL.md, not a legitimate shell invocation.
+        self.assertNotEqual(self.capture_warning("true"), "")
+
+    def run_cli(self, script: str, *args: str, marker: bool) -> subprocess.CompletedProcess[str]:
+        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        environment.pop(contract_lib.SHELL_MARKER_ENV, None)
+        if marker:
+            environment[contract_lib.SHELL_MARKER_ENV] = contract_lib.SHELL_MARKER_VALUE
+        return subprocess.run([sys.executable, str(SCRIPTS / script), *args], capture_output=True,
+                              text=True, check=False, env=environment)
+
+    def test_validate_contract_cli_reminds_only_without_the_marker(self) -> None:
+        bare = self.run_cli("validate_contract.py", "/does/not/exist.json", marker=False)
+        self.assertEqual(bare.returncode, 20)
+        self.assertIn("note: validate_contract.py ran without MOL_VIA=shell", bare.stderr)
+        marked = self.run_cli("validate_contract.py", "/does/not/exist.json", marker=True)
+        self.assertEqual(marked.returncode, bare.returncode)
+        self.assertNotIn("MOL_VIA", marked.stderr)
+        self.assertEqual(marked.stdout, bare.stdout)  # the reminder never touches stdout
+
+    def test_render_launcher_cli_reminds_only_without_the_marker(self) -> None:
+        bare = self.run_cli("render_launcher.py", "--contract", "/does/not/exist.json",
+                            "--output", "/tmp/mol-issue-23-unused.sh", marker=False)
+        self.assertEqual(bare.returncode, 20)
+        self.assertIn("note: render_launcher.py ran without MOL_VIA=shell", bare.stderr)
+        marked = self.run_cli("render_launcher.py", "--contract", "/does/not/exist.json",
+                              "--output", "/tmp/mol-issue-23-unused.sh", marker=True)
+        self.assertEqual(marked.returncode, bare.returncode)
+        self.assertNotIn("MOL_VIA", marked.stderr)
+
+    def test_bootstrap_contract_cli_reminds_only_without_the_marker(self) -> None:
+        # an invalid --repo still reaches the reminder before argparse's own usage error
+        bare = self.run_cli("bootstrap_contract.py", "--repo", "/does/not/exist", marker=False)
+        self.assertEqual(bare.returncode, 2)
+        self.assertIn("note: bootstrap_contract.py ran without MOL_VIA=shell", bare.stderr)
+        marked = self.run_cli("bootstrap_contract.py", "--repo", "/does/not/exist", marker=True)
+        self.assertEqual(marked.returncode, bare.returncode)
+        self.assertNotIn("MOL_VIA", marked.stderr)
 
 
 # ── launcher resolution ───────────────────────────────────────────────────────
@@ -851,7 +926,7 @@ class BudgetTests(Fixture):
         path.write_text(json.dumps(contract), encoding="utf-8")
         return subprocess.run([sys.executable, str(SCRIPTS / "validate_contract.py"), str(path),
                                "--no-source-check"], capture_output=True, text=True, check=False,
-                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "MOL_VIA": "shell"})
 
     def test_the_default_applies_when_the_block_is_absent(self) -> None:
         budget = contract_lib.auto_budget(self.declared())
@@ -1170,7 +1245,7 @@ class LearningBindingTests(Fixture):
                                  "--feature", str(feature), "--applied-file", str(applied),
                                  "--learning-mode", "suggest"],
                                 capture_output=True, text=True, check=False,
-                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "MOL_VIA": "shell"})
         self.assertEqual(result.returncode, 0, result.stderr)
         block = json.loads(result.stdout)["configuration"]["learning"]
         self.assertEqual(block["mode"], "suggest")

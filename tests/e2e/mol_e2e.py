@@ -68,8 +68,13 @@ def tree_state(root: Path) -> dict[str, str]:
 
 
 def run_script(name: str, *args: object, cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
-    """Run one of the skill's scripts ourselves: no TTY, stdin closed."""
-    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    """Run one of the skill's scripts ourselves: no TTY, stdin closed.
+
+    MOL_VIA=shell tells the script this reproduces a shell invocation exactly (correct cwd,
+    env, argv), the same declaration SKILL.md's command examples make — so its own
+    scripts-only-via-shell reminder (see warn_if_not_shell_invoked) stays quiet here.
+    """
+    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "MOL_VIA": "shell"}
     return subprocess.run([sys.executable, str(SCRIPTS / name), *[str(a) for a in args]], cwd=cwd,
                           env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                           timeout=timeout, start_new_session=True, check=False)

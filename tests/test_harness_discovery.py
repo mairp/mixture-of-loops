@@ -260,8 +260,8 @@ class HarnessDiscoveryTests(unittest.TestCase):
             bootstrap = subprocess.run(
                 ["setsid", sys.executable, str(base / "scripts/bootstrap_contract.py"), "--repo", str(box.repo),
                  "--feature", "specs/001-demo", "--output", "-"],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, env=box.environment(), check=False,
-                timeout=60)
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                env={**box.environment(), "MOL_VIA": "shell"}, check=False, timeout=60)
             self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
             self.assertEqual([task["id"] for task in json.loads(bootstrap.stdout)["inventory"]["tasks"]], ["T001"])
 

@@ -18,7 +18,7 @@ from pathlib import Path
 import sys
 import tempfile
 
-from contract_lib import ContractError, StaleSourceError, load_contract, validate_contract
+from contract_lib import ContractError, StaleSourceError, load_contract, validate_contract, warn_if_not_shell_invoked
 
 
 def write_status(path: Path, contract: dict, status: str) -> None:
@@ -39,6 +39,7 @@ def main() -> int:
                         help="set status to validated if and only if strict validation passes; "
                              "otherwise set it back to draft and report the blockers")
     args = parser.parse_args()
+    warn_if_not_shell_invoked("validate_contract.py")
     if args.promote and args.allow_draft:
         parser.error("--promote and --allow-draft are exclusive: promotion is the strict check")
     path = Path(args.contract)

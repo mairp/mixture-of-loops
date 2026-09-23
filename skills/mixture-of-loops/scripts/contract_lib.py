@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 
 
 SCHEMA_VERSION = "1.0"
@@ -58,6 +59,12 @@ LEARNING_DEFAULT = "off"
 LEARNING_THROUGH_ENV = "SPECSTRIDE_LEARNING_THROUGH"
 LEARNING_KEYS = {"mode", "decisions_through", "decisions_sha256", "effective", "source_path"}
 SENSITIVE_ENV = re.compile(r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:$|_)", re.I)
+# SKILL.md's command-line examples export this before running a script (steps 3, 8, 9), so
+# a real shell running the fenced block as one command line inherits it. Its absence does
+# not prove a wrapper -- a plain shell that skipped the export sees it too -- so this is a
+# reminder on stderr, never a failure: see warn_if_not_shell_invoked.
+SHELL_MARKER_ENV = "MOL_VIA"
+SHELL_MARKER_VALUE = "shell"
 
 
 class ContractError(Exception):
@@ -70,6 +77,20 @@ class StaleSourceError(ContractError):
 
 class LearningDecisionsChanged(StaleSourceError):
     """The decision-log prefix configuration.learning bound no longer hashes the same."""
+
+
+def warn_if_not_shell_invoked(script: str) -> None:
+    """Print SKILL.md's shell-cell reminder to stderr when MOL_VIA=shell is absent.
+
+    Never changes the exit code or stdout: callers run this unconditionally and ignore
+    its result. It cannot tell a wrapper from a plain shell that just skipped the export,
+    so it reads as a reminder, not an accusation.
+    """
+    if os.environ.get(SHELL_MARKER_ENV) != SHELL_MARKER_VALUE:
+        print(f"note: {script} ran without {SHELL_MARKER_ENV}={SHELL_MARKER_VALUE} set. "
+              f"SKILL.md's command-line rule: run this as a shell command line (%%bash or ! "
+              f"in a notebook harness), not through another language's subprocess API.",
+              file=sys.stderr)
 
 
 def load_contract(path: str | os.PathLike[str]) -> dict:

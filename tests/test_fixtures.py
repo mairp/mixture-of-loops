@@ -36,7 +36,7 @@ class FixtureTests(unittest.TestCase):
             ["setsid", sys.executable, str(link / "scripts/bootstrap_contract.py"), "--repo", str(repo),
              "--feature", mol_e2e.expectations(fixture)["feature"], "--output", str(contract)],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "MOL_VIA": "shell"})
         self.assertEqual(result.returncode, 0, result.stderr)
         return repo, json.loads(contract.read_text(encoding="utf-8"))
 
