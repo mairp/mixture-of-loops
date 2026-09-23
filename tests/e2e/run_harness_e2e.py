@@ -142,11 +142,50 @@ PROMPTS = {
 # one, in sleep mode so an intermediate running state is there to be observed.
 EXECUTION_STUB_ENV = {"MOL_EXEC_STUB_MODE": "sleep", "MOL_EXEC_STUB_SLEEP": "5",
                       "MOL_EXEC_STUB_FEATURE": "001-greeting"}
-# `auto` does strictly more than deriving: it also runs the pipeline and supervises it to
-# a terminal state, which costs at least one poll interval on top. A local model that
-# derives in ~18 minutes has nothing left of a 20-minute budget, so auto gets its own.
+# ── the budget ────────────────────────────────────────────────────────────────
+# Wall-clock seconds per run, by harness, model class (local or Compass) and run kind:
+# `auto` does strictly more than deriving (it also runs the pipeline and supervises it
+# to a terminal state), so it is budgeted apart. A cell's budget is 1.5x the slowest run
+# recorded for it, rounded up to 5 minutes, never below the old flat defaults below.
+# Slowest recorded runs, all qwen3.8-27b-q5 with thinking off:
+#   harness  generate (explicit/implicit)                 auto
+#   pi        446 s  (2026-09-23)            -> 1200      537 s (2026-09-20) -> 1800
+#   prime     577 s  (2026-09-23)            -> 1200      331 s (2026-09-20) -> 1800
+#   codex     718 s  (2026-09-23)            -> 1200      615 s (2026-09-20) -> 1800
+#   claude   1776 s  (the auto run; it holds -> 2700     1776 s (2026-09-20) -> 2700
+#            a whole generation. The 2026-09-23 generation hit 1200 s without finishing.)
+#   dsh       829 s  (2026-09-23 trial)      -> 1500      none               -> 1800
+# Claude Code is the slow one because every turn resends its ~30k-token context (30 to
+# 45 s a turn through the shim). Compass has no completed run on this host (STAGE is
+# retired, so every cell is infra) and keeps the flat defaults. --timeout overrides all.
 DEFAULT_TIMEOUT = 1200
 AUTO_TIMEOUT = 1800
+BUDGET_MARGIN = 1.5
+RECORDED_SECONDS = {  # (harness, auto) -> the slowest recorded run on a local model
+    ("pi", False): 446, ("pi", True): 537,
+    ("prime", False): 577, ("prime", True): 331,
+    ("codex", False): 718, ("codex", True): 615,
+    ("claude", False): 1776, ("claude", True): 1776,
+    ("dsh", False): 829,
+}
+
+
+def run_budget(harness: str, model: Model, mode: str, override: int | None = None) -> tuple[int, str]:
+    """(seconds, where the number comes from) for one run of `harness` in `mode`."""
+    auto = mode == "auto"
+    floor = AUTO_TIMEOUT if auto else DEFAULT_TIMEOUT
+    if override:
+        return override, "--timeout"
+    recorded = RECORDED_SECONDS.get((harness, auto)) if model.local else None
+    if recorded is None:
+        why = "a local model" if model.local else "Compass"
+        return floor, f"flat default: no recorded {harness} {'auto ' if auto else ''}run on {why}"
+    derived = -(-int(recorded * BUDGET_MARGIN) // 300) * 300
+    if derived <= floor:
+        return floor, f"flat default: {BUDGET_MARGIN}x the {recorded} s recorded fits in it"
+    return derived, f"{BUDGET_MARGIN}x the {recorded} s recorded for {harness} on a local model"
+
+
 FIXTURE_ALIASES = {"blocked": "greeting-blocked", "ready": "greeting-ready"}
 KERNEL_PYTHON = Path("/root/.prime/agent/kernel-venv/bin/python")
 PRIME_VARIANTS = Path("/root/prime-agent/variants.tsv")
@@ -491,6 +530,12 @@ class Prime(Harness):
                         onboard("prime", repo, environment))
 
 
+def claude_max_output(model: Model) -> str:
+    """bebop.sh's _bebop_max_output without thinking: a local model gets 8192 (the reserve
+    is subtracted from a small window, and it bounds a runaway turn), claude-* 32000."""
+    return "8192" if model.local else "32000"
+
+
 class Claude(Harness):
     """Claude Code through the local compass shim, exactly as `bebop <backend>` launches it.
 
@@ -536,9 +581,7 @@ class Claude(Harness):
                        **{variable: model for variable in CLAUDE_MODEL_VARIABLES},
                        "CLAUDE_CONFIG_DIR": str(config), "DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1",
                        "DISABLE_ERROR_REPORTING": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                       # bebop.sh's _bebop_max_output: a local model gets 8192 (the reserve is subtracted
-                       # from a small window, and it bounds a runaway turn), a claude-* model 32000
-                       "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192" if self.model.local else "32000"}
+                       "CLAUDE_CODE_MAX_OUTPUT_TOKENS": claude_max_output(self.model)}
         if self.model.local:
             environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(CONTEXT_WINDOWS[self.model.id])
         argv = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
@@ -822,7 +865,7 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
             (run / "collect-error.log").write_text(str(exc), encoding="utf-8")
         shutil.rmtree(tmp, ignore_errors=True)
     summary["duration_seconds"] = round(time.monotonic() - started, 1)
-    summary.update(exit_code=exit_code, timed_out=timed_out, reaped=reaped, left_over=left)
+    summary.update(exit_code=exit_code, timed_out=timed_out, timeout_seconds=timeout, reaped=reaped, left_over=left)
 
     transcript_path = run / "transcript.jsonl"
     if not transcript_path.exists():
@@ -1021,6 +1064,8 @@ def print_report(report: dict, color: bool) -> None:
             failed = [v["name"] for v in run.get("verdicts", []) if v["status"] == "fail"]
             detail = ("failed: " + ", ".join(failed)) if failed else f"{sum(v['status'] == 'pass' for v in run['verdicts'])} assertions passed"
         attempt = f" (attempt {run['attempt']})" if run.get("attempt", 1) > 1 else ""
+        if run.get("timed_out"):
+            attempt += f" (hit the {run.get('timeout_seconds')} s budget)"
         print(f"  {run['harness']:<7} {run['mode']:<9} {run['fixture']:<17} {paint(run['status'], color):<6} "
               f"{run.get('duration_seconds', ''):>6}  {detail}{attempt}")
     superseded = report.get("superseded_runs", [])
@@ -1081,8 +1126,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="both: explicit and implicit generation; all: those plus auto")
     parser.add_argument("--fixture", default="all", choices=("blocked", "ready", "all"))
     parser.add_argument("--timeout", type=int, default=None,
-                        help=f"wall-clock seconds per harness run (default: {DEFAULT_TIMEOUT}, "
-                             f"or {AUTO_TIMEOUT} in auto mode)")
+                        help="wall-clock seconds per harness run, overriding the per-harness and "
+                             f"per-model budget (flat defaults {DEFAULT_TIMEOUT}, or {AUTO_TIMEOUT} "
+                             "in auto mode; Claude Code on a local model gets more)")
     parser.add_argument("--retry-infra", type=int, default=1, metavar="N",
                         help="re-run a cell that ended as `infra` up to N more times once its route probes "
                              "clean again (default 1; 0 disables)")
@@ -1145,6 +1191,9 @@ def main(argv: list[str] | None = None) -> int:
             reason = None if live else "MOL_LIVE_E2E=1 is not set (live runs are opt-in)"
             reason = reason or harness.skip_reason()
             infra = probe(harness) if live and not reason else None
+            budgets = {mode: run_budget(name, model, mode, args.timeout) for mode in modes}
+            for mode, (seconds, source) in budgets.items():
+                print(f"budget {name} {mode} -> {model.id}: {seconds}s ({source})", file=sys.stderr, flush=True)
             for fixture in fixtures:
                 for mode in modes:
                     base = {"run": f"{name}-{mode}-{fixture}", "harness": name, "mode": mode, "fixture": fixture,
@@ -1152,7 +1201,7 @@ def main(argv: list[str] | None = None) -> int:
                     if reason:
                         report["runs"].append({**base, "status": "skip", "reason": reason})
                         continue
-                    timeout = args.timeout or (AUTO_TIMEOUT if mode == "auto" else DEFAULT_TIMEOUT)
+                    timeout, budget_source = budgets[mode]
                     attempt = 0
                     while True:
                         attempt += 1
@@ -1160,11 +1209,12 @@ def main(argv: list[str] | None = None) -> int:
                             result = {**base, "status": "infra", "infra_reason": f"route probe: {infra}",
                                       "attempt": attempt}
                         else:
-                            print(f"running {base['run']} (timeout {timeout}s, attempt {attempt}) ...",
+                            print(f"running {base['run']} (budget {timeout}s: {budget_source}; "
+                                  f"attempt {attempt}) ...",
                                   file=sys.stderr, flush=True)
                             try:
                                 result = {**run_one(harness, mode, fixture, evidence, timeout, snapshot),
-                                          "attempt": attempt}
+                                          "attempt": attempt, "budget": {"seconds": timeout, "source": budget_source}}
                             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                                 result = {**base, "status": "fail", "reason": f"runner error: {exc}",
                                           "verdicts": [mol_e2e.verdict("runner", False, str(exc))], "attempt": attempt}

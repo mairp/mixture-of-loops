@@ -388,7 +388,8 @@ MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all --mode auto --
   Every test reaps its process group, and each asserts no leftover process or held lock.
 - **Tier 3** (`tests/e2e/run_harness_e2e.py`, also `tests/test_live_e2e.py` under
   `MOL_LIVE_E2E=1`) runs each harness headlessly (stdin `/dev/null`, no controlling
-  terminal, hard timeout) against two fixture repositories in `tests/fixtures/`: one where a
+  terminal, a hard wall-clock budget per harness and model class that the runner prints
+  before each harness; `--timeout` overrides it) against two fixture repositories in `tests/fixtures/`: one where a
   non-delegable approval is missing, so the only correct outcome is a blocked draft whose
   open blocker points at `plan.md:17`, and one where it is present, so the only correct
   outcome is a validated contract and a launcher. Verdicts come from the event stream and
