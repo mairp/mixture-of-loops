@@ -346,9 +346,10 @@ MOL_SHOW_MESSAGES=1 python3 -m unittest tests.test_execution_e2e -v
 
 # Everything, including the live headless runs (opt-in). One model per campaign:
 # the local qwen3.8-27b-q5 by default; --model muse-glimmer-30b | nemotron-lightning-30b |
+# gpt-5 (Compass PROD through LiteLLM; pi, prime, Codex and dsh, never Claude Code) |
 # compass (claude-opus-4.8 through the local shim, what plain `bebop` runs)
 MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all
-MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all --model compass
+MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness pi,prime,codex,dsh --model gpt-5
 
 # The run/auto path, live: the model must read the request as `auto`, clear the
 # gate, launch detached, and report the run from its own telemetry
@@ -395,13 +396,18 @@ MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all --mode auto --
   outcome is a validated contract and a launcher. Verdicts come from the event stream and
   the filesystem: the skill was loaded, the three scripts ran, the contract re-validates,
   its facts match `tests/fixtures/expectations/`, and the launcher passes `bash -n` and a
-  read-only `--dry-run` with a refusing stub `specstride` on `PATH`. Every run uses a
+  read-only `--dry-run` with a refusing stub `specstride` on `PATH`. The model's own calls
+  are checked too: `status` came from `validate_contract.py --promote` (promoted, or refused
+  on the open blocker), the bootstrap's prerequisite inventory survived with the right
+  `present`, every script ran as a shell command, and nothing reached outside the
+  repository and `SKILL_ROOT` or searched for `specstride` (`stayed-in-scope`). Every run uses a
   temporary `HOME`, agent directory, `TMPDIR` and daemon socket, telemetry off, and a
   pristine copy of `bin/` and `skills/`, so a model cannot follow the skill link to this
   repository's tests. The real `~/.pi`, `~/.prime`, `~/.agents`, `~/.dsh` and
   `~/.claude/skills` are snapshotted before and compared after each run. One model per
   campaign (`--model`): a local llama-swap model — `qwen3.8-27b-q5` by default,
-  `muse-glimmer-30b`, `nemotron-lightning-30b` — or `compass`, claude-opus-4.8 through the
+  `muse-glimmer-30b`, `nemotron-lightning-30b` — `gpt-5` through LiteLLM (never bound to
+  Claude Code, whose shim garbles GPT output), or `compass`, claude-opus-4.8 through the
   local cc-compass-shim. Each harness is bound to it the way the fleet's own launchers bind
   it (pi `litellm/<id>` or `compass-shim/…`, prime's variant, Codex through LiteLLM's
   Responses route, Claude Code through the shim exactly as `bebop <backend>`, dsh from a

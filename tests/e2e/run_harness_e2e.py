@@ -12,13 +12,15 @@ Without MOL_LIVE_E2E=1 the live runs are reported as skips and the exit status
 is that of Tiers 1 and 2.
 
 One model per campaign, chosen with --model: a local llama-swap model
-(qwen3.8-27b-q5 by default, muse-glimmer-30b, nemotron-lightning-30b) or
+(qwen3.8-27b-q5 by default, muse-glimmer-30b, nemotron-lightning-30b), `gpt-5`
+(Compass PROD through LiteLLM; pi, prime, Codex and dsh -- never Claude Code) or
 `compass` (claude-opus-4.8 through the local cc-compass-shim, what plain `bebop`
-runs). Every harness is bound to that one model the way the fleet's own launchers
-bind it -- pi and Codex through LiteLLM, prime through its variant, Claude Code
-through the shim exactly as `bebop <backend>` does, dsh through a temporary
-DSH_HOME whose settings.yaml names the provider -- and the run refuses to start
-if any slot names anything else. Thinking is off everywhere.
+runs; its STAGE access has ended, so every cell on it is `infra`). Every harness is
+bound to that one model the way the fleet's own launchers bind it -- pi and Codex
+through LiteLLM, prime through its variant, Claude Code through the shim exactly as
+`bebop <backend>` does, dsh through a temporary DSH_HOME whose settings.yaml names
+the provider -- and the run refuses to start if any slot names anything else.
+Thinking is off everywhere.
 
 Before a harness runs, its exact route is probed with one real completion. A
 route that does not answer, or a run that dies on an upstream error, is reported
@@ -78,8 +80,13 @@ SHIM = "http://127.0.0.1:8088"
 # /root/.pi/agent/models.json, /root/prime-agent/variants.tsv, /root/.dsh/settings.yaml
 # and /root/gpu_rtx_3090/bebop.sh all name them the same way.
 LOCAL_MODELS = ("qwen3.8-27b-q5", "muse-glimmer-30b", "nemotron-lightning-30b")
+# A frontier model LiteLLM serves from Compass PROD: pi, prime, Codex and dsh reach it
+# through LiteLLM with `max_completion_tokens`. Claude Code is never bound to it (GPT
+# output through the shim's Anthropic translation renders garbled). Nothing of it runs
+# on this GPU, so no llama-swap check or model swap applies.
+FRONTIER_MODELS = ("gpt-5",)
 COMPASS_MODEL = "claude-opus-4.8"
-MODEL_CHOICES = LOCAL_MODELS + ("compass",)
+MODEL_CHOICES = LOCAL_MODELS + FRONTIER_MODELS + ("compass",)
 DEFAULT_MODEL = LOCAL_MODELS[0]
 # bebop.sh's ctxs table: what llama-swap serves each model with (`-c`); a client that
 # advertises more turns auto-compaction into a context overflow.
@@ -97,26 +104,41 @@ class Model:
 
     @property
     def local(self) -> bool:
-        return self.choice != "compass"
+        """Served by llama-swap on this host's GPU."""
+        return self.choice in LOCAL_MODELS
+
+    @property
+    def frontier(self) -> bool:
+        return self.choice in FRONTIER_MODELS
+
+    @property
+    def litellm(self) -> bool:
+        """Reached through LiteLLM; `compass` goes through the shim instead."""
+        return self.local or self.frontier
+
+    @property
+    def token_field(self) -> str:
+        """The chat-completions field that caps output: GPT-5 rejects `max_tokens`."""
+        return "max_completion_tokens" if self.frontier else "max_tokens"
 
     @property
     def pi(self) -> tuple[str, str]:
         """(provider, --model value) in /root/.pi/agent/models.json terms."""
-        provider = "litellm" if self.local else "compass-shim"
+        provider = "litellm" if self.litellm else "compass-shim"
         return provider, f"{provider}/{self.id}"
 
     @property
     def prime(self) -> tuple[str, str]:
         """(variant, provider): `prime <variant>` must resolve to provider/id in variants.tsv."""
-        if not self.local:
+        if self.choice == "compass":
             return "compass", "compass"
-        return {"qwen3.8-27b-q5": "qwen", "muse-glimmer-30b": "muse", "nemotron-lightning-30b": "nemotron"}[self.id], \
-            "fleet-local"
+        return {"qwen3.8-27b-q5": "qwen", "muse-glimmer-30b": "muse", "nemotron-lightning-30b": "nemotron",
+                "gpt-5": "gpt5"}[self.id], "fleet-local"
 
     @property
     def dsh(self) -> str:
         """The llm-pi-ai provider in /root/.dsh/settings.yaml that serves this model."""
-        return "local-high" if self.local else "compass-opus-high"
+        return "local-high" if self.local else "compass-gpt5-high" if self.frontier else "compass-opus-high"
 
     @property
     def claude(self) -> str:
@@ -135,7 +157,8 @@ INFRA_PATTERNS = re.compile(
     r"upstream error|\b50[0-4]\b|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out|"
     r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|Connection (error|refused|reset)|TRANSPORT:|PI_AI_ERROR|"
     r"no router for requested model|model_not_found|Model \"[^\"]+\" not found|not a valid model|"
-    r"AuthenticationError|invalid input model|Incorrect API key|rate limit|overloaded_error|"
+    r"AuthenticationError|invalid input model|Incorrect API key|Invalid API Key|insufficient_quota|"
+    r"rate limit|overloaded_error|"
     r"fetch failed|socket hang up|stream disconnected|Daemon worker client closed", re.IGNORECASE)
 PROMPTS = {
     "explicit": "{invocation} derive a pipeline for specs/001-greeting",
@@ -150,7 +173,7 @@ PROMPTS = {
 EXECUTION_STUB_ENV = {"MOL_EXEC_STUB_MODE": "sleep", "MOL_EXEC_STUB_SLEEP": "5",
                       "MOL_EXEC_STUB_FEATURE": "001-greeting"}
 # ── the budget ────────────────────────────────────────────────────────────────
-# Wall-clock seconds per run, by harness, model class (local or Compass) and run kind:
+# Wall-clock seconds per run, by harness, model class (local, gpt-5 or Compass) and run kind:
 # `auto` does strictly more than deriving (it also runs the pipeline and supervises it
 # to a terminal state), so it is budgeted apart. A cell's budget is 1.5x the slowest run
 # recorded for it, rounded up to 5 minutes, never below the old flat defaults below.
@@ -164,7 +187,8 @@ EXECUTION_STUB_ENV = {"MOL_EXEC_STUB_MODE": "sleep", "MOL_EXEC_STUB_SLEEP": "5",
 #   dsh       829 s  (2026-09-23 trial)      -> 1500      none               -> 1800
 # Claude Code is the slow one because every turn resends its ~30k-token context (30 to
 # 45 s a turn through the shim). Compass has no completed run on this host (STAGE is
-# retired, so every cell is infra) and keeps the flat defaults. --timeout overrides all.
+# retired, so every cell is infra) and keeps the flat defaults; so does gpt-5, until it
+# has recorded runs of its own. --timeout overrides all.
 DEFAULT_TIMEOUT = 1200
 AUTO_TIMEOUT = 1800
 BUDGET_MARGIN = 1.5
@@ -185,7 +209,7 @@ def run_budget(harness: str, model: Model, mode: str, override: int | None = Non
         return override, "--timeout"
     recorded = RECORDED_SECONDS.get((harness, auto)) if model.local else None
     if recorded is None:
-        why = "a local model" if model.local else "Compass"
+        why = "a local model" if model.local else f"the frontier model {model.id}" if model.frontier else "Compass"
         return floor, f"flat default: no recorded {harness} {'auto ' if auto else ''}run on {why}"
     derived = -(-int(recorded * BUDGET_MARGIN) // 300) * 300
     if derived <= floor:
@@ -337,10 +361,16 @@ def http_post_json(url: str, payload: dict, headers: dict[str, str], timeout: fl
         return None, f"{exc.__class__.__name__}: {exc}"
 
 
-def probe_openai_chat(base: str, model_id: str, key: str | None, timeout: float) -> str | None:
-    """One real one-token completion on an OpenAI-compatible chat route; None means it answered."""
+# Output caps for a probe, by the field that carries them: `max_completion_tokens` is a
+# reasoning model's, which spends tokens before it answers, so 4 would end it empty.
+PROBE_TOKENS = {"max_tokens": 4, "max_completion_tokens": 256}
+
+
+def probe_openai_chat(base: str, model_id: str, key: str | None, timeout: float,
+                      token_field: str = "max_tokens") -> str | None:
+    """One real short completion on an OpenAI-compatible chat route; None means it answered."""
     status, body = http_post_json(f"{base}/v1/chat/completions",
-                                  {"model": model_id, "max_tokens": 4, "stream": False,
+                                  {"model": model_id, token_field: PROBE_TOKENS[token_field], "stream": False,
                                    "messages": [{"role": "user", "content": "Reply with the word pong."}]},
                                   {"Authorization": f"Bearer {key}"} if key else {}, timeout)
     if status == 200 and '"choices"' in body:
@@ -348,10 +378,12 @@ def probe_openai_chat(base: str, model_id: str, key: str | None, timeout: float)
     return f"POST {base}/v1/chat/completions model={model_id}: status {status}: {body[:300]}"
 
 
-def probe_openai_responses(base: str, model_id: str, key: str | None, timeout: float) -> str | None:
+def probe_openai_responses(base: str, model_id: str, key: str | None, timeout: float,
+                           max_output_tokens: int = 16) -> str | None:
     """The Responses API route Codex uses (`wire_api = "responses"`)."""
     status, body = http_post_json(f"{base}/v1/responses",
-                                  {"model": model_id, "max_output_tokens": 16, "input": "Reply with the word pong.",
+                                  {"model": model_id, "max_output_tokens": max_output_tokens,
+                                   "input": "Reply with the word pong.",
                                    "stream": False},
                                   {"Authorization": f"Bearer {key}"} if key else {}, timeout)
     if status == 200 and '"output"' in body:
@@ -438,14 +470,19 @@ def onboard(harness: str, repo: Path, environment: dict[str, str]) -> str:
 
 
 def endpoint_skip(model: Model, *, litellm: bool = True, allow_swap: bool = False) -> str | None:
-    """Reasons a local route cannot be used right now; None when it can."""
-    if not model.local:
+    """Reasons a local route cannot be used right now; None when it can.
+
+    `litellm=False` is for a harness that reaches a local model on llama-swap directly
+    (dsh); a frontier model is only ever reached through LiteLLM."""
+    if model.choice == "compass":
         status, _ = http_get(f"{SHIM}/health")
         return None if status == 200 else f"the local compass shim {SHIM} is not answering (status {status})"
-    if litellm:
+    if litellm or model.frontier:
         status, _ = http_get(f"{LITELLM}/health/liveliness")
         if status != 200:
             return f"LiteLLM {LITELLM} is not answering (status {status})"
+    if model.frontier:
+        return None   # nothing on this GPU: no llama-swap load to check, no swap to force
     status, body = http_get(f"{LLAMA_SWAP}/running")
     if status != 200:
         return f"llama-swap {LLAMA_SWAP}/running is not answering (status {status})"
@@ -491,8 +528,8 @@ class Pi(Harness):
             return blocked
         binding = self._binding()
         key = resolve_key_reference(binding.get("apiKey", ""))
-        if self.model.local:
-            return probe_openai_chat(LITELLM, self.model.id, key, PROBE_TIMEOUT)
+        if self.model.litellm:
+            return probe_openai_chat(LITELLM, self.model.id, key, PROBE_TIMEOUT, self.model.token_field)
         return probe_anthropic_messages(SHIM, self.model.id, key or "dummy", PROBE_TIMEOUT)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
@@ -541,8 +578,8 @@ class Prime(Harness):
             return blocked
         binding = provider_binding(self.models_json, self.model.prime[1], self.model.id)
         key = resolve_key_reference(binding.get("apiKey", ""))
-        if self.model.local:
-            return probe_openai_chat(LITELLM, self.model.id, key, PROBE_TIMEOUT)
+        if self.model.litellm:
+            return probe_openai_chat(LITELLM, self.model.id, key, PROBE_TIMEOUT, self.model.token_field)
         return probe_anthropic_messages(SHIM, self.model.id, key or "dummy", PROBE_TIMEOUT)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
@@ -584,6 +621,9 @@ class Claude(Harness):
     def skip_reason(self) -> str | None:
         if self.version() is None:
             return "claude is not installed or --version failed"
+        if self.model.frontier:
+            return (f"{self.model.id} is not bound to Claude Code: GPT output through the shim's Anthropic "
+                    "translation renders garbled; the frontier check runs on pi, prime, Codex and dsh")
         return None
 
     def probe(self) -> str | None:
@@ -637,7 +677,7 @@ class Codex(Harness):
     def skip_reason(self) -> str | None:
         if self.version() is None:
             return "codex is not installed or --version failed"
-        if not self.model.local:
+        if not self.model.litellm:
             return ("Codex speaks the OpenAI Responses API only and LiteLLM has no claude-opus-4.8 route; "
                     "the compass model cannot be bound to Codex on this host")
         try:
@@ -652,7 +692,8 @@ class Codex(Harness):
             return blocked
         binding = provider_binding(self.models_json, "litellm", self.model.id)
         key = resolve_key_reference(binding.get("apiKey", ""))
-        return probe_openai_responses(LITELLM, self.model.id, key, PROBE_TIMEOUT)
+        return probe_openai_responses(LITELLM, self.model.id, key, PROBE_TIMEOUT,
+                                      PROBE_TOKENS["max_completion_tokens"] if self.model.frontier else 16)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
         home, tmp, codex_home = run / "home", Path(tempfile.mkdtemp(prefix="mol-")), run / "codex-home"
@@ -662,7 +703,7 @@ class Codex(Harness):
         key = resolve_key_reference(binding.get("apiKey", "")) or ""
         (codex_home / "config.toml").write_text(
             f'model = "{self.model.id}"\nmodel_provider = "mol-litellm"\n\n[model_providers.mol-litellm]\n'
-            f'name = "LiteLLM (local)"\nbase_url = "{LITELLM}/v1"\nenv_key = "MOL_LITELLM_KEY"\n'
+            f'name = "LiteLLM"\nbase_url = "{LITELLM}/v1"\nenv_key = "MOL_LITELLM_KEY"\n'
             'wire_api = "responses"\n', encoding="utf-8")
         environment = {**base_environment(home, tmp, token), "CODEX_HOME": str(codex_home), "MOL_LITELLM_KEY": key}
         argv = ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "workspace-write",
@@ -719,7 +760,8 @@ class Dsh(Harness):
     """
     name = "dsh"
     stdout_name = "stdout.log"
-    key_env = {"local-high": "LOCAL_LITELLM_API_KEY", "compass-opus-high": "COMPASS_STAGE_API_KEY"}
+    key_env = {"local-high": "LOCAL_LITELLM_API_KEY", "compass-gpt5-high": "LITELLM_MASTER_KEY",
+               "compass-opus-high": "COMPASS_STAGE_API_KEY"}
 
     def version(self) -> str | None:
         return command_version(["dsh", "--version"])
@@ -758,8 +800,9 @@ class Dsh(Harness):
                                 self.key_env[self.model.dsh])
         settings = dsh_settings(self._real_settings(), self.model.dsh, self.model.id)
         base = str(settings["llm-pi-ai"]["providers"][self.model.dsh].get("baseURL", "")).rstrip("/")
-        if self.model.local:
-            return probe_openai_chat(base[:-3] if base.endswith("/v1") else base, self.model.id, key, PROBE_TIMEOUT)
+        if self.model.litellm:   # an OpenAI route: llama-swap directly for a local model, LiteLLM for gpt-5
+            return probe_openai_chat(base[:-3] if base.endswith("/v1") else base, self.model.id, key, PROBE_TIMEOUT,
+                                     self.model.token_field)
         return probe_anthropic_messages(base, self.model.id, key or "dummy", PROBE_TIMEOUT)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
@@ -804,6 +847,9 @@ def make_harnesses(model: Model, allow_swap: bool = False) -> dict[str, Harness]
 def check_allowlist(harness: str, argv: list[str], environment: dict[str, str], model: Model) -> None:
     """Refuse to launch anything that is not bound to the campaign's one model."""
     if harness == "claude":
+        if model.frontier:
+            raise RuntimeError(f"refusing to launch claude on {model.id}: GPT output through the shim's "
+                               "Anthropic translation renders garbled")
         wrong = {v: environment.get(v) for v in CLAUDE_MODEL_VARIABLES if environment.get(v) != model.claude}
         if wrong or environment.get("ANTHROPIC_BASE_URL") != SHIM:
             raise RuntimeError(f"refusing to launch claude: every model slot must be {model.claude} via {SHIM}: {wrong}")
@@ -820,8 +866,8 @@ def check_allowlist(harness: str, argv: list[str], environment: dict[str, str], 
         if argv.count("--model") != 1 or argv[argv.index("--model") + 1] != value or "--provider" in argv:
             raise RuntimeError(f"refusing to launch: pi model must be exactly {value}")
     elif harness == "codex":
-        if not model.local or argv.count("-m") != 1 or argv[argv.index("-m") + 1] != model.id:
-            raise RuntimeError(f"refusing to launch: codex model must be exactly {model.id} (local only)")
+        if not model.litellm or argv.count("-m") != 1 or argv[argv.index("-m") + 1] != model.id:
+            raise RuntimeError(f"refusing to launch: codex model must be exactly {model.id} (a LiteLLM model)")
     elif harness == "dsh":
         dsh_home = environment.get("DSH_HOME", "")
         if not dsh_home or dsh_home.startswith(str(DSH_HOME_REAL)) or "--patch" in argv or "--profile" not in argv \
@@ -1150,6 +1196,9 @@ def reevaluate(evidence: Path) -> int:
         old = json.loads(summary_path.read_text(encoding="utf-8"))
         run = summary_path.parent
         root = Path(old["root"]) if old.get("root") else run
+        # Where the model worked, for stayed-in-scope: the root itself, or for old evidence
+        # the run directory as it was then (its transcript names that path, even in a copy).
+        worked = root if old.get("root") else Path(old["repo"]).parent if old.get("repo") else run
         materialized = False
         if root != run:
             if root.exists():
@@ -1177,10 +1226,14 @@ def reevaluate(evidence: Path) -> int:
                                          repo=root / "repo", transcript=transcript, timed_out=old["timed_out"],
                                          exit_code=old["exit_code"], harness_stub_calls=stub_calls,
                                          execution_stub_calls=exec_calls, expect_execution=old["mode"] == "auto",
-                                         work=root, root=root,
+                                         work=root, root=worked,
                                          grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
                                                        "mol_e2e", "expectations/greeting", "reference_contract",
-                                                       "summary.json", "report.json", "home-snapshot", str(evidence),
+                                                       "summary.json", "report.json", "home-snapshot",
+                                                       # before #26 a run worked inside the evidence
+                                                       # directory, so every call named it
+                                                       *([] if evidence.resolve() in worked.resolve().parents
+                                                         else [str(evidence)]),
                                                        *[str(evidence / o) for o in os.listdir(evidence) if o != run.name]])
             verdicts = mol_e2e.evaluate(context) + [v for v in old["verdicts"] if v["name"] in carried]
             changed = {v["name"]: v["status"] for v in verdicts} != {v["name"]: v["status"] for v in old["verdicts"]}
@@ -1204,7 +1257,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--harness", default="all", help="pi|prime|codex|claude|dsh|all, or a comma list")
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=MODEL_CHOICES,
                         help=f"the one model every harness is bound to (default {DEFAULT_MODEL}); "
-                             "`compass` is claude-opus-4.8 through the local shim, as plain `bebop`")
+                             "`gpt-5` is Compass PROD through LiteLLM (not Claude Code); `compass` is "
+                             "claude-opus-4.8 through the local shim, as plain `bebop`")
     parser.add_argument("--mode", default="both",
                         choices=("explicit", "implicit", "auto", "both", "all"),
                         help="both: explicit and implicit generation; all: those plus auto")
@@ -1251,7 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, interrupted)
 
     report: dict = {"evidence_dir": str(evidence), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    "model": {"choice": model.choice, "id": model.id, "local": model.local},
+                    "model": {"choice": model.choice, "id": model.id, "local": model.local, "frontier": model.frontier},
                     "tiers": [], "runs": [], "probes": [], "superseded_runs": []}
     if not args.skip_tiers:
         report["tiers"] = [run_tier("tier1", evidence), run_tier("tier2", evidence)]
