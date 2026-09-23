@@ -84,6 +84,29 @@ class FixtureTests(unittest.TestCase):
                 # the same path named from the feature directory would be the wrong base
                 self.assertFalse((repo / expected["path"]).parent.joinpath(expected["file"]).exists())
 
+    def test_a_refused_promote_names_what_the_draft_still_owes(self) -> None:
+        # the bootstrap draft: derivation not done, and the absent approval has no blocker yet
+        repo, draft = self.bootstrap(self.workspace(), "greeting-blocked")
+        expected = mol_e2e.expectations("greeting-blocked")["prerequisite"]
+        contract = repo / "launch-contract.json"
+        result = mol_e2e.run_script("validate_contract.py", "--promote", contract, cwd=repo)
+        self.assertEqual(result.returncode, 20, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("next: the bootstrap placeholder `semantic-derivation-required` is still open", result.stderr)
+        self.assertIn(f"next: {expected['id']} names `{expected['file']}`, which is absent "
+                      f"({expected['path']}:{expected['line']})", result.stderr)
+        # the derived blocked contract owes nothing more: its blocker is at the prerequisite's line
+        contract.write_text(json.dumps(mol_e2e.reference_contract(draft, "greeting-blocked"), indent=2),
+                            encoding="utf-8")
+        result = mol_e2e.run_script("validate_contract.py", "--promote", contract, cwd=repo)
+        self.assertEqual(result.returncode, 20, result.stderr)
+        self.assertNotIn("next:", result.stderr)
+        # ready: the approval is present, so only the placeholder is named
+        repo, draft = self.bootstrap(self.workspace(), "greeting-ready")
+        result = mol_e2e.run_script("validate_contract.py", "--promote", repo / "launch-contract.json", cwd=repo)
+        self.assertEqual(result.returncode, 20, result.stderr)
+        self.assertEqual(result.stderr.count("next:"), 1, result.stderr)
+
     def test_promote_owns_the_status_field(self) -> None:
         # blocked: a hand-set `validated` on a contract with an open blocker is undone and refused
         base = self.workspace()

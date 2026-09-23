@@ -156,9 +156,11 @@ an existing root-level launcher, which keeps working unchanged.
 
    Never write `status` yourself: the bootstrap writes `draft`, and only `--promote`
    writes `validated`, and only when the strict check passes. While any `blocker` finding
-   is `open`, `--promote` exits 20, leaves (or sets) `draft`, and prints each blocker; that
-   draft, with its blockers, is the deliverable for a blocked pipeline. Do not render a
-   launch-ready script from it, and do not resolve a blocker to make the check pass.
+   is `open`, `--promote` exits 20, leaves (or sets) `draft`, and prints each blocker. A
+   `next:` line names work the draft still owes (derivation not done, or an absent
+   prerequisite with no blocker at its line): do it, then promote again. Without `next:`
+   lines, that draft, with its blockers, is the deliverable for a blocked pipeline. Do not
+   render a launch-ready script from it, and do not resolve a blocker to make the check pass.
 9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`, the same shell command line
    style as steps 3 and 8 (neither call is one of the skill's scripts, so there is no
    marker to carry):
