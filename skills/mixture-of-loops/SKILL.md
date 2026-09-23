@@ -115,8 +115,7 @@ an existing root-level launcher, which keeps working unchanged.
    command line, not a call to make through a language's process API (see above):
 
    ```text
-   export MOL_VIA=shell
-   python3 SKILL_ROOT/scripts/bootstrap_contract.py \
+   MOL_VIA=shell python3 SKILL_ROOT/scripts/bootstrap_contract.py \
      --repo REPOSITORY --feature FEATURE_PATH --learning-mode MODE --output LAUNCH_CONTRACT
    ```
 
@@ -150,9 +149,8 @@ an existing root-level launcher, which keeps working unchanged.
 8. Validate, then render. Same rule as step 3 — a shell command line, not a subprocess call:
 
    ```text
-   export MOL_VIA=shell
-   python3 SKILL_ROOT/scripts/validate_contract.py --promote LAUNCH_CONTRACT
-   python3 SKILL_ROOT/scripts/render_launcher.py \
+   MOL_VIA=shell python3 SKILL_ROOT/scripts/validate_contract.py --promote LAUNCH_CONTRACT
+   MOL_VIA=shell python3 SKILL_ROOT/scripts/render_launcher.py \
      --contract LAUNCH_CONTRACT --output RUN_SCRIPT
    ```
 
@@ -161,10 +159,11 @@ an existing root-level launcher, which keeps working unchanged.
    is `open`, `--promote` exits 20, leaves (or sets) `draft`, and prints each blocker; that
    draft, with its blockers, is the deliverable for a blocked pipeline. Do not render a
    launch-ready script from it, and do not resolve a blocker to make the check pass.
-9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`, the same way:
+9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`, the same shell command line
+   style as steps 3 and 8 (neither call is one of the skill's scripts, so there is no
+   marker to carry):
 
    ```text
-   export MOL_VIA=shell
    bash -n RUN_SCRIPT
    RUN_SCRIPT --dry-run
    ```

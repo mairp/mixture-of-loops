@@ -16,6 +16,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -186,12 +187,17 @@ class ModeSelectionTests(unittest.TestCase):
 
 
 # ── the shell-cell reminder (issue #23: a wrapper loses cwd/env/quoting) ───────
-# SKILL.md's command examples (steps 3, 8, 9) export MOL_VIA=shell before the command, so
-# a real shell running the fenced block as one command line passes it to the script. A
+# SKILL.md's command examples (steps 3 and 8) prefix each script invocation inline --
+# `MOL_VIA=shell python3 ...` -- rather than a separate `export` line, because prime (and
+# IPython generally) gives each `!` line its own shell: a leading `!export MOL_VIA=shell`
+# would run in a different shell than the `!python3 ...` line that follows and the marker
+# would never arrive, tripping the reminder in the very harness it targets. An inline
+# prefix travels with the command in %%bash, a `!` line, and every plain shell alike. A
 # notebook-style harness that re-implements the command through subprocess.run instead
-# drops the export, so the script sees it unset and reminds the model on stderr -- never
-# changing its exit code or stdout, since it cannot tell that case apart from a plain shell
-# that simply skipped the export (see contract_lib.warn_if_not_shell_invoked).
+# cannot carry a prefix it never parsed, so the script sees it unset and reminds the model
+# on stderr -- never changing its exit code or stdout, since it cannot tell that case apart
+# from a plain shell that simply didn't type the prefix (see
+# contract_lib.warn_if_not_shell_invoked).
 
 class ShellMarkerReminderTests(unittest.TestCase):
     def capture_warning(self, marker: str | None) -> str:
@@ -249,6 +255,57 @@ class ShellMarkerReminderTests(unittest.TestCase):
                               "--output", "/tmp/mol-issue-23-unused.sh", marker=True)
         self.assertEqual(marked.returncode, bare.returncode)
         self.assertNotIn("MOL_VIA", marked.stderr)
+
+    # ── SKILL.md and the scripts can't drift apart ─────────────────────────────
+    # These two run the literal fenced-block text of steps 3 and 8, not a paraphrase of
+    # it, through bash -c -- the same "one command line, one shell" contract SKILL.md's
+    # preamble describes. If a future edit to SKILL.md ever drops the MOL_VIA=shell
+    # prefix, or a future edit to contract_lib renames the marker, this starts failing.
+
+    FENCED_TEXT_BLOCK = re.compile(r"```text\n(.*?)```", re.S)
+
+    def skill_md_block(self, contains: str) -> str:
+        text = (SCRIPTS.parent / "SKILL.md").read_text(encoding="utf-8")
+        for block in self.FENCED_TEXT_BLOCK.findall(text):
+            if contains in block:
+                return block
+        raise AssertionError(f"no fenced ```text block in SKILL.md contains {contains!r}")
+
+    def run_skill_md_block(self, contains: str, substitutions: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        block = self.skill_md_block(contains)
+        for placeholder, value in substitutions.items():
+            block = block.replace(placeholder, value)
+        return subprocess.run(["bash", "-c", block], capture_output=True, text=True, check=False,
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+
+    def test_skill_md_step_3_carries_the_marker_inline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            feature = repository / "specs" / "001-demo"
+            feature.mkdir(parents=True)
+            (feature / "tasks.md").write_text("## Phase 1: Setup\n- [ ] T001 Do it\n", encoding="utf-8")
+            contract = repository / "launch-contract.json"
+            result = self.run_skill_md_block("bootstrap_contract.py", {
+                "SKILL_ROOT": str(SCRIPTS.parent),
+                "REPOSITORY": str(repository),
+                "FEATURE_PATH": "specs/001-demo",
+                "MODE": "off",
+                "LAUNCH_CONTRACT": str(contract),
+            })
+            self.assertNotIn("MOL_VIA", result.stderr, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(contract.is_file())
+
+    def test_skill_md_step_8_carries_the_marker_inline(self) -> None:
+        # both script lines in the step-8 block, exactly as they run in one %%bash cell;
+        # neither run needs to succeed here -- an invalid --contract still passes argument
+        # parsing and reaches the reminder check before it fails.
+        result = self.run_skill_md_block("validate_contract.py --promote", {
+            "SKILL_ROOT": str(SCRIPTS.parent),
+            "LAUNCH_CONTRACT": "/does/not/exist.json",
+            "RUN_SCRIPT": "/tmp/mol-issue-23-step8-unused.sh",
+        })
+        self.assertNotIn("MOL_VIA", result.stderr, result.stderr)
 
     def test_bootstrap_contract_cli_reminds_only_without_the_marker(self) -> None:
         # an invalid --repo still reaches the reminder before argparse's own usage error
