@@ -21,6 +21,19 @@ import mol_e2e  # noqa: E402
 import run_harness_e2e  # noqa: E402
 
 SKILL_MD = "/tmp/x/repo/.agents/skills/mixture-of-loops/SKILL.md"
+DSH_SETTINGS = {
+    "agent-default-model": {"provider": "zai", "model": "glm-5.3-flash"},
+    "llm-pi-ai": {"providers": {
+        "zai": {"displayName": "Z.AI", "apiKeyEnv": "ZAI_API_KEY", "baseURL": "https://api.z.ai/api/coding/paas/v4",
+                "models": [{"id": "glm-5.3-flash", "name": "GLM-5.3-Flash"}]},
+        "local-high": {"displayName": "Local", "apiKeyEnv": "LOCAL_LITELLM_API_KEY", "api": "openai-completions",
+                       "baseURL": "http://127.0.0.1:8081/v1", "reasoning": "high",
+                       "models": [{"id": "qwen3.8-27b-q5", "contextWindow": 229376, "maxTokens": 49152,
+                                   "reasoningEfforts": {"off": None, "high": "high"}},
+                                  {"id": "nemotron-lightning-30b", "contextWindow": 131072}]},
+        "compass-opus-high": {"apiKeyEnv": "COMPASS_STAGE_API_KEY", "api": "anthropic-messages",
+                              "baseURL": "http://127.0.0.1:8088", "models": [{"id": "claude-opus-4.8"}]}}},
+    "permission": {"defaultPreset": "danger-full-access"}, "agent-presets": {"default": "standard"}}
 S = "/tmp/x/repo/.agents/skills/mixture-of-loops/scripts"
 
 
@@ -249,29 +262,135 @@ class E2ELogicTests(unittest.TestCase):
         for name in ("real-homes-unchanged", "checkout-unchanged", "no-pipeline-started"):
             self.assertEqual(verdicts[name], "fail", name)
 
-    def test_model_allowlist_rejects_everything_but_the_local_model(self) -> None:
+    def test_model_allowlist_rejects_everything_but_the_campaign_model(self) -> None:
         check = run_harness_e2e.check_allowlist
-        local = run_harness_e2e.LOCAL_MODEL
+        qwen = run_harness_e2e.Model("qwen3.8-27b-q5")
+        compass = run_harness_e2e.Model("compass")
         claude_env = {"ANTHROPIC_BASE_URL": run_harness_e2e.SHIM,
-                      **{v: local for v in run_harness_e2e.CLAUDE_MODEL_VARIABLES}}
-        check("pi", ["pi", "-p", "--model", "litellm/qwen3.8-27b-q5", "x"], {})
-        check("prime", ["prime", "qwen", "-p", "x"], {})
-        check("codex", ["codex", "exec", "-m", local, "x"], {})
-        check("claude", ["claude", "-p", "--model", local, "x"], claude_env)
+                      **{v: qwen.id for v in run_harness_e2e.CLAUDE_MODEL_VARIABLES}}
+        check("pi", ["pi", "-p", "--model", "litellm/qwen3.8-27b-q5", "x"], {}, qwen)
+        check("pi", ["pi", "-p", "--model", "compass-shim/claude-opus-4.8", "x"], {}, compass)
+        check("prime", ["prime", "qwen", "-p", "x"], {}, qwen)
+        check("prime", ["prime", "compass", "-p", "x"], {}, compass)
+        check("codex", ["codex", "exec", "-m", qwen.id, "x"], {}, qwen)
+        check("claude", ["claude", "-p", "--model", qwen.id, "x"], claude_env, qwen)
+        with tempfile.TemporaryDirectory() as tmp:
+            import yaml
+            Path(tmp, "settings.yaml").write_text(yaml.safe_dump(run_harness_e2e.dsh_settings(
+                DSH_SETTINGS, "local-high", qwen.id)), encoding="utf-8")
+            check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, qwen)
+            rejected_dsh = [
+                (["dsh", "--profile", "headless", "x"], {"DSH_HOME": "/root/.dsh"}),          # the real home
+                (["dsh", "--profile", "headless", "--patch", "p.yml", "x"], {"DSH_HOME": tmp}),  # a patch loses to settings
+                (["dsh", "--profile", "web", "x"], {"DSH_HOME": tmp}),
+                (["dsh", "--profile", "headless", "x"], {}),
+            ]
+            for argv, environment in rejected_dsh:
+                with self.subTest(argv=argv, environment=environment):
+                    with self.assertRaises(RuntimeError):
+                        check("dsh", argv, environment, qwen)
+            with self.assertRaises(RuntimeError):      # settings bound to another model than the campaign's
+                check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, compass)
         rejected = [
-            ("pi", ["pi", "-p", "--model", "litellm/gpt-5", "x"], {}),
-            ("pi", ["pi", "-p", "x"], {}),
-            ("prime", ["prime", "auto", "-p", "x"], {}),
-            ("prime", ["prime", "sol", "-p", "x"], {}),
-            ("prime", ["prime", "qwen", "--model", "gpt-5.5", "-p", "x"], {}),
-            ("codex", ["codex", "exec", "-m", "gpt-5.6-luna", "x"], {}),
-            ("claude", ["claude", "-p", "--model", local, "x"], {**claude_env, "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5"}),
-            ("claude", ["claude", "-p", "--model", local, "x"], {**claude_env, "ANTHROPIC_BASE_URL": "https://api.anthropic.com"}),
+            ("pi", ["pi", "-p", "--model", "litellm/gpt-5", "x"], {}, qwen),
+            ("pi", ["pi", "-p", "--model", "litellm/qwen3.8-27b-q5", "x"], {}, compass),
+            ("pi", ["pi", "-p", "x"], {}, qwen),
+            ("prime", ["prime", "auto", "-p", "x"], {}, qwen),
+            ("prime", ["prime", "sol", "-p", "x"], {}, qwen),
+            ("prime", ["prime", "qwen", "-p", "x"], {}, compass),
+            ("prime", ["prime", "qwen", "--model", "gpt-5.5", "-p", "x"], {}, qwen),
+            ("codex", ["codex", "exec", "-m", "gpt-5.6-luna", "x"], {}, qwen),
+            ("codex", ["codex", "exec", "-m", compass.id, "x"], {}, compass),   # codex has no Anthropic route
+            ("claude", ["claude", "-p", "--model", qwen.id, "x"],
+             {**claude_env, "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5"}, qwen),
+            ("claude", ["claude", "-p", "--model", qwen.id, "x"],
+             {**claude_env, "ANTHROPIC_BASE_URL": "https://api.anthropic.com"}, qwen),
+            ("claude", ["claude", "-p", "--model", qwen.id, "x"], claude_env, compass),
         ]
-        for harness, argv, environment in rejected:
-            with self.subTest(harness=harness, argv=argv):
+        for harness, argv, environment, model in rejected:
+            with self.subTest(harness=harness, argv=argv, model=model.choice):
                 with self.assertRaises(RuntimeError):
-                    check(harness, argv, environment)
+                    check(harness, argv, environment, model)
+
+    def test_model_bindings_follow_the_fleet_launchers(self) -> None:
+        qwen, muse, compass = (run_harness_e2e.Model(c) for c in ("qwen3.8-27b-q5", "muse-glimmer-30b", "compass"))
+        self.assertEqual((qwen.local, qwen.id, qwen.pi, qwen.prime, qwen.dsh, qwen.claude),
+                         (True, "qwen3.8-27b-q5", ("litellm", "litellm/qwen3.8-27b-q5"), ("qwen", "fleet-local"),
+                          "local-high", "qwen3.8-27b-q5"))
+        self.assertEqual((muse.prime, muse.dsh), (("muse", "fleet-local"), "local-high"))
+        self.assertEqual((compass.local, compass.id, compass.pi, compass.prime, compass.dsh, compass.claude),
+                         (False, "claude-opus-4.8", ("compass-shim", "compass-shim/claude-opus-4.8"),
+                          ("compass", "compass"), "compass-opus-high", "claude-opus-4.8"))
+        self.assertEqual(run_harness_e2e.EXPLICIT["dsh"], "/mixture-of-loops")
+        self.assertEqual(set(run_harness_e2e.HARNESS_NAMES), set(run_harness_e2e.make_harnesses(qwen)))
+
+    def test_dsh_settings_keep_one_provider_bound_to_one_model(self) -> None:
+        settings = run_harness_e2e.dsh_settings(DSH_SETTINGS, "local-high", "qwen3.8-27b-q5")
+        self.assertEqual(settings["agent-default-model"],
+                         {"provider": "local-high", "model": "qwen3.8-27b-q5", "reasoningEffort": "off"})
+        self.assertEqual(list(settings["llm-pi-ai"]["providers"]), ["local-high"])
+        provider = settings["llm-pi-ai"]["providers"]["local-high"]
+        self.assertEqual([m["id"] for m in provider["models"]], ["qwen3.8-27b-q5"])
+        self.assertEqual(provider["baseURL"], "http://127.0.0.1:8081/v1")
+        self.assertEqual(settings["permission"], {"defaultPreset": "danger-full-access"})
+        self.assertNotIn("zai", json.dumps(settings))
+        for provider_name, model in (("local-high", "muse-glimmer-30b"), ("local-high", "glm-5.3-flash"), ("nope", "x")):
+            with self.subTest(provider=provider_name, model=model):
+                with self.assertRaises(RuntimeError):
+                    run_harness_e2e.dsh_settings(DSH_SETTINGS, provider_name, model)
+        line, value = run_harness_e2e.dsh_credential("LOCAL_LITELLM_API_KEY: abc\nZAI_API_KEY: zzz\n",
+                                                     "LOCAL_LITELLM_API_KEY")
+        self.assertEqual((line, value), ("LOCAL_LITELLM_API_KEY: abc", "abc"))
+        self.assertEqual(run_harness_e2e.dsh_credential("ZAI_API_KEY: zzz\n", "COMPASS_STAGE_API_KEY"), (None, None))
+
+    def test_dsh_session_normalizes(self) -> None:
+        def ev(kind: str, **data: object) -> str:
+            return json.dumps({"type": kind, "seq": 1, "time": 0, "data": data})
+        transcript = mol_e2e.parse_dsh_session([
+            json.dumps({"type": "session", "version": 0, "id": "session-1", "cwd": "/tmp/x/repo"}),
+            ev("user/message", content=[{"type": "text", "text": "/mixture-of-loops derive a pipeline"}], role="user"),
+            ev("request/context", provider="local-high", model="qwen3.8-27b-q5", contextWindow=229376),
+            ev("tool/call", turn=1, step=1, callId="c1", name="skill", arguments=json.dumps({"name": "mixture-of-loops"})),
+            ev("tool/result", turn=1, step=1, message={"content": [{"type": "tool-result", "toolCallId": "c1",
+                                                                     "content": [{"type": "text", "text": "<skill_content>...</skill_content>"}]}]}),
+            ev("tool/call", turn=1, step=2, callId="c2", name="read", arguments=json.dumps({"file_path": SKILL_MD})),
+            ev("tool/result", turn=1, step=2, message={"content": [{"type": "tool-result", "toolCallId": "c2",
+                                                                     "content": [{"type": "text", "text": "body"}]}]}),
+            ev("tool/call", turn=1, step=3, callId="c3", name="bash",
+               arguments=json.dumps({"command": f"python3 {S}/bootstrap_contract.py --repo . --feature specs/001-greeting"})),
+            ev("tool/result", turn=1, step=3, message={"content": [{"type": "tool-result", "toolCallId": "c3", "isError": True,
+                                                                     "content": [{"type": "text", "text": "boom"}]}]}),
+            ev("assistant/message", turn=1, step=3, message={"role": "assistant", "content": [],
+                                                              "source": {"kind": "model", "provider": "local-high",
+                                                                         "model": "qwen3.8-27b-q5"}}),
+            ev("turn/end", turn=1, reason={"kind": "completed"}),
+        ])
+        self.assertEqual(transcript.skill_invoked, ["mixture-of-loops"])
+        self.assertEqual([c.kind for c in transcript.calls], ["other", "read", "shell"])
+        self.assertEqual(transcript.calls[1].text, SKILL_MD)
+        self.assertTrue(transcript.calls[2].runs("bootstrap_contract.py"))
+        self.assertIs(transcript.calls[2].is_error, True)
+        self.assertEqual(transcript.calls[2].result, "boom")
+        self.assertEqual(transcript.models, ["qwen3.8-27b-q5"])
+        self.assertEqual((transcript.agent_end, transcript.stop_reason, transcript.error_message), (True, "stop", None))
+        aborted = mol_e2e.parse_dsh_session([ev("turn/end", turn=1, reason={"kind": "aborted", "reason": {"kind": "user"}})])
+        self.assertEqual((aborted.agent_end, aborted.stop_reason), (True, "aborted"))
+        self.assertIn("user", aborted.error_message)
+
+    def test_infra_failures_are_told_apart_from_real_ones(self) -> None:
+        infra = run_harness_e2e.infra_reason
+        empty = mol_e2e.Transcript()
+        self.assertIsNone(infra(empty, "", ""))
+        self.assertIn("route failed", infra(empty, "dsh: TRANSPORT: Connection error.\n", "") or "")
+        self.assertIn("route failed", infra(empty, "API Error: 500 qwen upstream error", "") or "")
+        self.assertIn("route failed", infra(empty, 'PI_AI_ERROR: 404 "no router for requested model"', "") or "")
+        upstream = mol_e2e.Transcript(error_message="stream disconnected", agent_end=True, stop_reason="error")
+        self.assertIn("terminal error", infra(upstream, "", "") or "")
+        # A run that made real tool calls and then failed a verdict is the skill's or the harness's.
+        worked = mol_e2e.parse_transcript(happy_script("pi").end())
+        self.assertIsNone(infra(worked, "API Error: 500 qwen upstream error (one retried request)", ""))
+        real = mol_e2e.Transcript(error_message="PRE-001 blocker not honoured", agent_end=True, stop_reason="error")
+        self.assertIsNone(infra(real, "", ""))
 
     def test_codex_and_claude_streams_normalize(self) -> None:
         claude = mol_e2e.parse_claude_stream([

@@ -19,6 +19,11 @@ language's process API: the working directory, the environment and the quoting a
 of the command, and a wrapper is where they get lost. In a notebook-style harness that
 means a shell cell (`%%bash`) or a `!` line, not `subprocess.run`.
 
+Work inside the repository and `SKILL_ROOT` only. Do not list or read parent directories,
+sibling directories or the wider filesystem, and do not search for `specstride` or other
+tooling: whether it is installed is the launcher's `--dry-run` job to report (step 9), not
+yours to discover.
+
 ## Inputs and output
 
 Determine from the request and repository:
@@ -128,20 +133,31 @@ an existing root-level launcher, which keeps working unchanged.
    not a preflight input. Existing authorization may be consumed within its scope;
    missing non-delegable authority blocks before the affected model run. Never fabricate
    a signature, identity, approval, budget, tolerance, or deployment authority.
+
+   Paths a prerequisite names are relative to the repository root, not to the feature
+   directory. The draft's `inventory.prerequisites` lists each one as written, where it
+   resolves under `repository.root`, and whether it is `present`; read existence from
+   there rather than guessing a base. A non-delegable authority that is not `present` is
+   an open `blocker` finding whose `source` is the prerequisite's own line, and it stops
+   derivation at a draft: a runtime precondition check on the same path does not resolve
+   it, because the authority must exist before the pipeline is derived, not before it
+   runs.
 7. Make stage order explicit and serial unless actual interfaces and shared-state rules
    prove concurrency safe. Use argv arrays and environment references, never shell
    strings, `eval`, `sh -c`, or blanket answers to prompts.
 8. Validate, then render:
 
    ```text
-   python3 SKILL_ROOT/scripts/validate_contract.py LAUNCH_CONTRACT
+   python3 SKILL_ROOT/scripts/validate_contract.py --promote LAUNCH_CONTRACT
    python3 SKILL_ROOT/scripts/render_launcher.py \
      --contract LAUNCH_CONTRACT --output RUN_SCRIPT
    ```
 
-   If validation cannot reach `validated`, still leave the reviewable draft and report
-   each blocker. Do not render a launch-ready script from unresolved execution-critical
-   findings.
+   Never write `status` yourself: the bootstrap writes `draft`, and only `--promote`
+   writes `validated`, and only when the strict check passes. While any `blocker` finding
+   is `open`, `--promote` exits 20, leaves (or sets) `draft`, and prints each blocker; that
+   draft, with its blockers, is the deliverable for a blocked pipeline. Do not render a
+   launch-ready script from it, and do not resolve a blocker to make the check pass.
 9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`. Dry-run is read-only and
    takes precedence over `--implement` and `--smoke` in every argument order. Run further
    stubbed checks when the generated setup, decision, or recovery logic warrants them.

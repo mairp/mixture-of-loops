@@ -11,14 +11,28 @@ fixture repositories, in explicit (/skill:) and implicit (plain request) mode.
 Without MOL_LIVE_E2E=1 the live runs are reported as skips and the exit status
 is that of Tiers 1 and 2.
 
-Only the local model is allowed (pi: litellm/qwen3.8-27b-q5 --thinking off;
-prime: variant qwen --thinking off). Every run uses a temporary HOME, temporary
-agent directories, a private TMPDIR and daemon socket, telemetry off, stdin
-/dev/null and no controlling terminal, and a hard wall-clock timeout that kills
-the process group. Processes are tagged with a unique MOL_E2E_RUN value and
-every process still carrying it is reaped afterwards (`prime-agent shutdown` is
-host-wide and is never called). The real ~/.pi, ~/.prime, ~/.agents and
-~/.claude/skills are snapshotted before and compared after every run.
+One model per campaign, chosen with --model: a local llama-swap model
+(qwen3.8-27b-q5 by default, muse-glimmer-30b, nemotron-lightning-30b) or
+`compass` (claude-opus-4.8 through the local cc-compass-shim, what plain `bebop`
+runs). Every harness is bound to that one model the way the fleet's own launchers
+bind it -- pi and Codex through LiteLLM, prime through its variant, Claude Code
+through the shim exactly as `bebop <backend>` does, dsh through a temporary
+DSH_HOME whose settings.yaml names the provider -- and the run refuses to start
+if any slot names anything else. Thinking is off everywhere.
+
+Before a harness runs, its exact route is probed with one real completion. A
+route that does not answer, or a run that dies on an upstream error, is reported
+as `infra` (the serving stack), never as `fail` (the skill or the harness), and
+is retried once the route answers again (--retry-infra). A cell is `skip` only
+for a reason that is printed and that no configuration on this host removes.
+
+Every run uses a temporary HOME, temporary agent directories, a private TMPDIR
+and daemon socket, telemetry off, stdin /dev/null and no controlling terminal,
+and a hard wall-clock timeout that kills the process group. Processes are tagged
+with a unique MOL_E2E_RUN value and every process still carrying it is reaped
+afterwards (`prime-agent shutdown` is host-wide and is never called). The real
+~/.pi, ~/.prime, ~/.agents, ~/.dsh and ~/.claude/skills are snapshotted before
+and compared after every run.
 """
 
 from __future__ import annotations
@@ -35,6 +49,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -47,17 +62,74 @@ ONBOARD = ROOT / "bin" / "onboard-skill"
 HARNESS_NAMES = ("pi", "prime", "codex", "claude", "dsh")
 LITELLM = "http://127.0.0.1:4000"
 LLAMA_SWAP = "http://127.0.0.1:8081"
-LOCAL_MODEL = "qwen3.8-27b-q5"
-# The only model selections this runner will launch. Anything else is rejected before launch.
-ALLOWED_MODELS = {"pi": ("--model", "litellm/qwen3.8-27b-q5"), "prime": ("variant", "qwen"),
-                  "claude": ("--model", LOCAL_MODEL), "codex": ("-m", LOCAL_MODEL)}
+SHIM = "http://127.0.0.1:8088"
+
+# ── the model ─────────────────────────────────────────────────────────────────
+# One campaign, one model. The local ones are llama-swap names (one loads at a time, so
+# every harness in a campaign shares the load); `compass` is claude-opus-4.8 through the
+# cc-compass-shim, the route plain `bebop` takes. The bindings below are the fleet's own:
+# /root/.pi/agent/models.json, /root/prime-agent/variants.tsv, /root/.dsh/settings.yaml
+# and /root/gpu_rtx_3090/bebop.sh all name them the same way.
+LOCAL_MODELS = ("qwen3.8-27b-q5", "muse-glimmer-30b", "nemotron-lightning-30b")
+COMPASS_MODEL = "claude-opus-4.8"
+MODEL_CHOICES = LOCAL_MODELS + ("compass",)
+DEFAULT_MODEL = LOCAL_MODELS[0]
+# bebop.sh's ctxs table: what llama-swap serves each model with (`-c`); a client that
+# advertises more turns auto-compaction into a context overflow.
+CONTEXT_WINDOWS = {"qwen3.8-27b-q5": 229376, "muse-glimmer-30b": 131072, "nemotron-lightning-30b": 131072}
+
+
+@dataclass(frozen=True)
+class Model:
+    """The one model of a campaign, and how each harness names it."""
+    choice: str
+
+    @property
+    def id(self) -> str:
+        return COMPASS_MODEL if self.choice == "compass" else self.choice
+
+    @property
+    def local(self) -> bool:
+        return self.choice != "compass"
+
+    @property
+    def pi(self) -> tuple[str, str]:
+        """(provider, --model value) in /root/.pi/agent/models.json terms."""
+        provider = "litellm" if self.local else "compass-shim"
+        return provider, f"{provider}/{self.id}"
+
+    @property
+    def prime(self) -> tuple[str, str]:
+        """(variant, provider): `prime <variant>` must resolve to provider/id in variants.tsv."""
+        if not self.local:
+            return "compass", "compass"
+        return {"qwen3.8-27b-q5": "qwen", "muse-glimmer-30b": "muse", "nemotron-lightning-30b": "nemotron"}[self.id], \
+            "fleet-local"
+
+    @property
+    def dsh(self) -> str:
+        """The llm-pi-ai provider in /root/.dsh/settings.yaml that serves this model."""
+        return "local-high" if self.local else "compass-opus-high"
+
+    @property
+    def claude(self) -> str:
+        """ANTHROPIC_MODEL for the shim: local names route to LiteLLM, claude-* to Compass."""
+        return self.id
+
+
 # Every model slot Claude Code can use; any other name would pass through the shim to Compass (off-host).
 CLAUDE_MODEL_VARIABLES = ("ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
                           "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
                           "CLAUDE_CODE_SUBAGENT_MODEL")
-SHIM = "http://127.0.0.1:8088"
 EXPLICIT = {"pi": "/skill:mixture-of-loops", "prime": "/skill:mixture-of-loops", "claude": "/mixture-of-loops",
-            "codex": "$mixture-of-loops"}
+            "codex": "$mixture-of-loops", "dsh": "/mixture-of-loops"}
+# A run that ends on one of these is the serving stack failing, not the skill or the harness.
+INFRA_PATTERNS = re.compile(
+    r"upstream error|\b50[0-4]\b|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out|"
+    r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|Connection (error|refused|reset)|TRANSPORT:|PI_AI_ERROR|"
+    r"no router for requested model|model_not_found|Model \"[^\"]+\" not found|not a valid model|"
+    r"AuthenticationError|invalid input model|Incorrect API key|rate limit|overloaded_error|"
+    r"fetch failed|socket hang up|stream disconnected|Daemon worker client closed", re.IGNORECASE)
 PROMPTS = {
     "explicit": "{invocation} derive a pipeline for specs/001-greeting",
     "implicit": ("Derive an unattended Specstride pipeline for the Spec Kit feature in specs/001-greeting: "
@@ -169,13 +241,76 @@ def resolve_key_reference(reference: str) -> str | None:
     return reference or None
 
 
-def provider_binding(models_json: Path, provider: str) -> dict:
-    """One provider with only the local model entry; apiKey stays a reference, never a value."""
-    value = json.loads(models_json.read_text(encoding="utf-8"))["providers"][provider]
-    models = [model for model in value.get("models", []) if model.get("id") == LOCAL_MODEL]
+def provider_binding(models_json: Path, provider: str, model_id: str) -> dict:
+    """One provider with only the chosen model's entry; apiKey stays a reference, never a value."""
+    providers = json.loads(models_json.read_text(encoding="utf-8"))["providers"]
+    if provider not in providers:
+        raise RuntimeError(f"{models_json}: no provider {provider}")
+    value = providers[provider]
+    models = [model for model in value.get("models", []) if model.get("id") == model_id]
     if len(models) != 1:
-        raise RuntimeError(f"{models_json}: expected one {LOCAL_MODEL} entry under {provider}")
+        raise RuntimeError(f"{models_json}: expected one {model_id} entry under {provider}")
     return {**{k: v for k, v in value.items() if k != "models"}, "models": models}
+
+
+def http_post_json(url: str, payload: dict, headers: dict[str, str], timeout: float) -> tuple[int | None, str]:
+    request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST",
+                                     headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode("utf-8", "replace")[:2000]
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")[:2000]
+    except Exception as exc:  # noqa: BLE001 - any failure is the probe's finding
+        return None, f"{exc.__class__.__name__}: {exc}"
+
+
+def probe_openai_chat(base: str, model_id: str, key: str | None, timeout: float) -> str | None:
+    """One real one-token completion on an OpenAI-compatible chat route; None means it answered."""
+    status, body = http_post_json(f"{base}/v1/chat/completions",
+                                  {"model": model_id, "max_tokens": 4, "stream": False,
+                                   "messages": [{"role": "user", "content": "Reply with the word pong."}]},
+                                  {"Authorization": f"Bearer {key}"} if key else {}, timeout)
+    if status == 200 and '"choices"' in body:
+        return None
+    return f"POST {base}/v1/chat/completions model={model_id}: status {status}: {body[:300]}"
+
+
+def probe_openai_responses(base: str, model_id: str, key: str | None, timeout: float) -> str | None:
+    """The Responses API route Codex uses (`wire_api = "responses"`)."""
+    status, body = http_post_json(f"{base}/v1/responses",
+                                  {"model": model_id, "max_output_tokens": 16, "input": "Reply with the word pong.",
+                                   "stream": False},
+                                  {"Authorization": f"Bearer {key}"} if key else {}, timeout)
+    if status == 200 and '"output"' in body:
+        return None
+    return f"POST {base}/v1/responses model={model_id}: status {status}: {body[:300]}"
+
+
+def probe_anthropic_messages(base: str, model_id: str, key: str, timeout: float) -> str | None:
+    """The Anthropic Messages route the shim serves to Claude Code, pi and prime."""
+    status, body = http_post_json(f"{base}/v1/messages",
+                                  {"model": model_id, "max_tokens": 4,
+                                   "messages": [{"role": "user", "content": "Reply with the word pong."}]},
+                                  {"x-api-key": key, "Authorization": f"Bearer {key}", "anthropic-version": "2023-06-01"},
+                                  timeout)
+    if status == 200 and '"content"' in body:
+        return None
+    return f"POST {base}/v1/messages model={model_id}: status {status}: {body[:300]}"
+
+
+def litellm_key() -> str | None:
+    """The fleet gateway key, only to probe and to redact; read the way the harness configs do."""
+    env_file = Path("/root/litellm/.env")
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("LITELLM_MASTER_KEY="):
+                return line.split("=", 1)[1].strip() or None
+    return os.environ.get("LITELLM_MASTER_KEY")
+
+
+# A local model's first request loads it into VRAM (a minute or more for a 27B), so probes wait.
+PROBE_TIMEOUT = 420.0
 
 
 # ── harness adapters ──────────────────────────────────────────────────────────
@@ -192,15 +327,29 @@ class Prepared:
 class Harness:
     name = ""
     events = True          # the JSONL event stream is parsed
+    stdout_name = "transcript.jsonl"   # where the process's stdout goes; the transcript unless collect() writes it
+
+    def __init__(self, model: Model, allow_swap: bool = False):
+        self.model = model
+        self.allow_swap = allow_swap   # let llama-swap evict another loaded model for this one
 
     def version(self) -> str | None:
         raise NotImplementedError
 
     def skip_reason(self) -> str | None:
+        """A reason no configuration on this host removes; None when the harness can run."""
+        raise NotImplementedError
+
+    def probe(self) -> str | None:
+        """One real completion through this harness's exact route; None when it answered."""
         raise NotImplementedError
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
         raise NotImplementedError
+
+    def collect(self, run: Path, environment: dict[str, str]) -> None:
+        """Copy what the harness left in its temporary state into the run directory (before cleanup)."""
+        return None
 
 
 def onboard(harness: str, repo: Path, environment: dict[str, str]) -> str:
@@ -216,10 +365,15 @@ def onboard(harness: str, repo: Path, environment: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def local_endpoint_skip() -> str | None:
-    status, _ = http_get(f"{LITELLM}/health/liveliness")
-    if status != 200:
-        return f"LiteLLM {LITELLM} is not answering (status {status})"
+def endpoint_skip(model: Model, *, litellm: bool = True, allow_swap: bool = False) -> str | None:
+    """Reasons a local route cannot be used right now; None when it can."""
+    if not model.local:
+        status, _ = http_get(f"{SHIM}/health")
+        return None if status == 200 else f"the local compass shim {SHIM} is not answering (status {status})"
+    if litellm:
+        status, _ = http_get(f"{LITELLM}/health/liveliness")
+        if status != 200:
+            return f"LiteLLM {LITELLM} is not answering (status {status})"
     status, body = http_get(f"{LLAMA_SWAP}/running")
     if status != 200:
         return f"llama-swap {LLAMA_SWAP}/running is not answering (status {status})"
@@ -227,10 +381,14 @@ def local_endpoint_skip() -> str | None:
         running = [entry.get("model") for entry in json.loads(body).get("running", [])]
     except ValueError:
         return "llama-swap /running returned invalid JSON"
-    others = [model for model in running if model != LOCAL_MODEL]
-    if others:
-        return (f"llama-swap has {others} loaded; running {LOCAL_MODEL} would force a model swap and evict "
-                "someone else's work (local-model-ops rule), so the live run is skipped")
+    status, body = http_get(f"{LLAMA_SWAP}/v1/models")
+    served = re.findall(r'"id":\s*"([^"]+)"', body) if status == 200 else []
+    if served and model.id not in served:
+        return f"llama-swap does not serve {model.id} (it serves {served})"
+    others = [name for name in running if name != model.id]
+    if others and not allow_swap:
+        return (f"llama-swap has {others} loaded; running {model.id} would force a model swap and evict "
+                "someone else's work (local-model-ops rule); pass --allow-swap to do it anyway")
     return None
 
 
@@ -245,19 +403,36 @@ class Pi(Harness):
         if self.version() is None:
             return "pi is not installed or --version failed"
         if not self.models_json.is_file():
-            return f"{self.models_json} is missing (needed for the litellm provider binding)"
-        return local_endpoint_skip()
+            return f"{self.models_json} is missing (needed for the provider binding)"
+        try:
+            provider_binding(self.models_json, self.model.pi[0], self.model.id)
+        except RuntimeError as exc:
+            return str(exc)
+        return None
+
+    def _binding(self) -> dict:
+        return provider_binding(self.models_json, self.model.pi[0], self.model.id)
+
+    def probe(self) -> str | None:
+        blocked = endpoint_skip(self.model, allow_swap=self.allow_swap)
+        if blocked:
+            return blocked
+        binding = self._binding()
+        key = resolve_key_reference(binding.get("apiKey", ""))
+        if self.model.local:
+            return probe_openai_chat(LITELLM, self.model.id, key, PROBE_TIMEOUT)
+        return probe_anthropic_messages(SHIM, self.model.id, key or "dummy", PROBE_TIMEOUT)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
         home, tmp, agent = run / "home", Path(tempfile.mkdtemp(prefix="mol-")), run / "agent-pi"
         home.mkdir()
         agent.mkdir()
-        binding = provider_binding(self.models_json, "litellm")
-        (agent / "models.json").write_text(json.dumps({"providers": {"litellm": binding}}, indent=2), encoding="utf-8")
+        provider, model = self.model.pi
+        binding = self._binding()
+        (agent / "models.json").write_text(json.dumps({"providers": {provider: binding}}, indent=2), encoding="utf-8")
         environment = {**base_environment(home, tmp, token), "PI_CODING_AGENT_DIR": str(agent),
                        "PI_OFFLINE": "1", "PI_OTEL_DISABLE": "1"}
-        flag, model = ALLOWED_MODELS["pi"]
-        argv = ["pi", "-p", "--mode", "json", "--no-session", "--offline", "-a", flag, model,
+        argv = ["pi", "-p", "--mode", "json", "--no-session", "--offline", "-a", "--model", model,
                 "--thinking", "off", prompt]
         return Prepared(argv, environment, model, [s for s in [resolve_key_reference(binding.get("apiKey", ""))] if s],
                         onboard("pi", repo, environment))
@@ -275,34 +450,54 @@ class Prime(Harness):
             return "prime-agent is not installed or --version failed"
         if shutil.which("prime") is None:
             return "the prime variant launcher is not on PATH"
+        variant, provider = self.model.prime
         rows = [line.split("\t") for line in PRIME_VARIANTS.read_text(encoding="utf-8").splitlines()
-                if line.startswith("prime-qwen\t")] if PRIME_VARIANTS.is_file() else []
-        if len(rows) != 1 or rows[0][1:5] != ["backend", "qwen", "fleet-local", LOCAL_MODEL]:
-            return f"variant qwen does not resolve to backend fleet-local/{LOCAL_MODEL} in {PRIME_VARIANTS}"
+                if line.startswith(f"prime-{variant}\t")] if PRIME_VARIANTS.is_file() else []
+        if len(rows) != 1 or rows[0][1:5] != ["backend", variant, provider, self.model.id]:
+            return f"variant {variant} does not resolve to backend {provider}/{self.model.id} in {PRIME_VARIANTS}"
         if not KERNEL_PYTHON.is_file():
             return f"{KERNEL_PYTHON} is missing; a fresh kernel venv would need an online bootstrap"
-        return local_endpoint_skip()
+        try:
+            provider_binding(self.models_json, provider, self.model.id)
+        except (RuntimeError, OSError) as exc:
+            return str(exc)
+        return None
+
+    def probe(self) -> str | None:
+        blocked = endpoint_skip(self.model, allow_swap=self.allow_swap)
+        if blocked:
+            return blocked
+        binding = provider_binding(self.models_json, self.model.prime[1], self.model.id)
+        key = resolve_key_reference(binding.get("apiKey", ""))
+        if self.model.local:
+            return probe_openai_chat(LITELLM, self.model.id, key, PROBE_TIMEOUT)
+        return probe_anthropic_messages(SHIM, self.model.id, key or "dummy", PROBE_TIMEOUT)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
         home, tmp = run / "home", Path(tempfile.mkdtemp(prefix="mol-"))
         agent = home / ".prime" / "agent"
         agent.mkdir(parents=True)
-        binding = provider_binding(self.models_json, "fleet-local")
-        (agent / "models.json").write_text(json.dumps({"providers": {"fleet-local": binding}}, indent=2),
+        variant, provider = self.model.prime
+        binding = provider_binding(self.models_json, provider, self.model.id)
+        (agent / "models.json").write_text(json.dumps({"providers": {provider: binding}}, indent=2),
                                            encoding="utf-8")
         environment = {**base_environment(home, tmp, token), "PRIME_AGENT_CODING_AGENT_DIR": str(agent),
                        "PRIME_AGENT_TELEMETRY": "0", "DO_NOT_TRACK": "1", "PI_OFFLINE": "1",
                        "PRIME_AGENT_KERNEL_PYTHON": str(KERNEL_PYTHON), "AGENTOPS_BIN": "/nonexistent/agentops"}
-        _, variant = ALLOWED_MODELS["prime"]
         argv = ["prime", variant, "--mode", "json", "--no-session", "--offline", "--thinking", "off",
                 "--daemon-socket", str(tmp / "d.sock"), "-p", prompt]
-        return Prepared(argv, environment, f"prime-{variant} -> fleet-local/{LOCAL_MODEL}",
+        return Prepared(argv, environment, f"prime-{variant} -> {provider}/{self.model.id}",
                         [s for s in [resolve_key_reference(binding.get("apiKey", ""))] if s],
                         onboard("prime", repo, environment))
 
 
 class Claude(Harness):
-    """Claude Code through the local compass shim (:8088 -> LiteLLM -> llama-swap), as `bebop qwen` does."""
+    """Claude Code through the local compass shim, exactly as `bebop <backend>` launches it.
+
+    bebop.sh pins every model slot to the one backend (one model in VRAM, no subagent
+    swap), advertises the window llama-swap serves, and points ANTHROPIC_BASE_URL at
+    the shim, which sends claude-* names to Compass and everything else to LiteLLM.
+    """
     name = "claude"
 
     def version(self) -> str | None:
@@ -311,27 +506,48 @@ class Claude(Harness):
     def skip_reason(self) -> str | None:
         if self.version() is None:
             return "claude is not installed or --version failed"
-        status, _ = http_get(f"{SHIM}/health")
-        if status is None:
-            return f"the local compass shim {SHIM} is not answering"
-        return local_endpoint_skip()
+        return None
+
+    def probe(self) -> str | None:
+        status, body = http_get(f"{SHIM}/health")
+        if status != 200:
+            return f"the local compass shim {SHIM} is not answering (status {status})"
+        blocked = endpoint_skip(self.model, allow_swap=self.allow_swap)
+        if blocked:
+            return blocked
+        if self.model.local:
+            try:
+                served = json.loads(body)
+                routed = set(served.get("qwen_models", [])) | set(served.get("openai_models", []))
+            except ValueError:
+                routed = set()
+            if routed and self.model.id not in routed:
+                return f"the shim routes {sorted(routed)} to LiteLLM, not {self.model.id}: add it to its .env"
+        return probe_anthropic_messages(SHIM, self.model.claude, "mol-e2e-local-shim", PROBE_TIMEOUT)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
         home, tmp, config = run / "home", Path(tempfile.mkdtemp(prefix="mol-")), run / "claude-config"
         home.mkdir()
         config.mkdir()
+        model = self.model.claude
         environment = {**base_environment(home, tmp, token), "ANTHROPIC_BASE_URL": SHIM,
                        # the shim has no key configured (loopback only); this is not a credential
                        "ANTHROPIC_AUTH_TOKEN": "mol-e2e-local-shim",
-                       **{variable: LOCAL_MODEL for variable in CLAUDE_MODEL_VARIABLES},
+                       **{variable: model for variable in CLAUDE_MODEL_VARIABLES},
                        "CLAUDE_CONFIG_DIR": str(config), "DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1",
                        "DISABLE_ERROR_REPORTING": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                       "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16000"}
+                       # bebop.sh's _bebop_max_output: a local model gets 8192 (the reserve is subtracted
+                       # from a small window, and it bounds a runaway turn), a claude-* model 32000
+                       "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192" if self.model.local else "32000"}
+        if self.model.local:
+            environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(CONTEXT_WINDOWS[self.model.id])
         argv = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-                "--model", LOCAL_MODEL, "--permission-mode", "acceptEdits",
+                "--model", model, "--permission-mode", "acceptEdits",
                 # one argument: the variadic `--allowedTools <tools...>` form swallows the prompt
                 "--allowed-tools=Bash,Read,Write,Edit,Glob,Grep,Skill", prompt]
-        return Prepared(argv, environment, f"claude -> shim -> {LOCAL_MODEL}", [], onboard("claude", repo, environment))
+        route = "LiteLLM" if self.model.local else "Compass"
+        return Prepared(argv, environment, f"claude -> shim -> {route} -> {model}", [],
+                        onboard("claude", repo, environment))
 
 
 class Codex(Harness):
@@ -345,64 +561,208 @@ class Codex(Harness):
     def skip_reason(self) -> str | None:
         if self.version() is None:
             return "codex is not installed or --version failed"
-        return local_endpoint_skip()
+        if not self.model.local:
+            return ("Codex speaks the OpenAI Responses API only and LiteLLM has no claude-opus-4.8 route; "
+                    "the compass model cannot be bound to Codex on this host")
+        try:
+            provider_binding(self.models_json, "litellm", self.model.id)
+        except (RuntimeError, OSError) as exc:
+            return str(exc)
+        return None
+
+    def probe(self) -> str | None:
+        blocked = endpoint_skip(self.model, allow_swap=self.allow_swap)
+        if blocked:
+            return blocked
+        binding = provider_binding(self.models_json, "litellm", self.model.id)
+        key = resolve_key_reference(binding.get("apiKey", ""))
+        return probe_openai_responses(LITELLM, self.model.id, key, PROBE_TIMEOUT)
 
     def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
         home, tmp, codex_home = run / "home", Path(tempfile.mkdtemp(prefix="mol-")), run / "codex-home"
         home.mkdir()
         codex_home.mkdir()
-        binding = provider_binding(self.models_json, "litellm")
+        binding = provider_binding(self.models_json, "litellm", self.model.id)
         key = resolve_key_reference(binding.get("apiKey", "")) or ""
         (codex_home / "config.toml").write_text(
-            f'model = "{LOCAL_MODEL}"\nmodel_provider = "mol-litellm"\n\n[model_providers.mol-litellm]\n'
+            f'model = "{self.model.id}"\nmodel_provider = "mol-litellm"\n\n[model_providers.mol-litellm]\n'
             f'name = "LiteLLM (local)"\nbase_url = "{LITELLM}/v1"\nenv_key = "MOL_LITELLM_KEY"\n'
             'wire_api = "responses"\n', encoding="utf-8")
         environment = {**base_environment(home, tmp, token), "CODEX_HOME": str(codex_home), "MOL_LITELLM_KEY": key}
         argv = ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "workspace-write",
-                "-m", LOCAL_MODEL, prompt]
-        return Prepared(argv, environment, f"codex -> LiteLLM responses -> {LOCAL_MODEL}", [key] if key else [],
+                "-m", self.model.id, prompt]
+        return Prepared(argv, environment, f"codex -> LiteLLM responses -> {self.model.id}", [key] if key else [],
                         onboard("codex", repo, environment))
 
 
-class Unsupported(Harness):
-    """Codex, Claude Code and dsh: reported with the reason they are not run live."""
+DSH_HOME_REAL = Path("/root/.dsh")
 
-    def __init__(self, name: str, version_argv: list[str], reason: str):
-        self.name, self._version_argv, self._reason = name, version_argv, reason
+
+def dsh_settings(real_settings: dict, provider: str, model_id: str) -> dict:
+    """The settings.yaml of a temporary DSH_HOME: the real file's one provider, filtered to the model.
+
+    dsh has no per-run model flag and `--patch` on `agent-default-model` loses to the
+    settings file at run time (verified 2026-09-23: the patched run answered from the
+    settings' zai/glm-5.3-flash). What does bind the model is the settings file itself,
+    the way /root/muse-harness-ab/run_ab.py bound it for every dsh cell of the August
+    campaigns: a copy with `agent-default-model` rewritten. Only the chosen provider is
+    kept, so a fallback cannot reach any other backend.
+    """
+    providers = ((real_settings.get("llm-pi-ai") or {}).get("providers") or {})
+    if provider not in providers:
+        raise RuntimeError(f"settings.yaml has no llm-pi-ai provider {provider}")
+    entry = dict(providers[provider])
+    models = [m for m in entry.get("models", []) if isinstance(m, dict) and m.get("id") == model_id]
+    if len(models) != 1:
+        raise RuntimeError(f"settings.yaml provider {provider} does not declare model {model_id}")
+    entry["models"] = models
+    return {"agent-default-model": {"provider": provider, "model": model_id, "reasoningEffort": "off"},
+            "llm-pi-ai": {"providers": {provider: entry}},
+            "permission": {"defaultPreset": "danger-full-access"},
+            "agent-presets": {"default": "standard"}}
+
+
+def dsh_credential(real_credentials: str, key_env: str) -> tuple[str | None, str | None]:
+    """(the line for key_env, its value) from ~/.dsh/.credentials.yaml -- copied, never printed."""
+    for line in real_credentials.splitlines():
+        if line.startswith(f"{key_env}:"):
+            value = line.split(":", 1)[1].strip().strip("'\"")
+            return line, (value or None)
+    return None, None
+
+
+class Dsh(Harness):
+    """DeepSeek Harness headless, from a temporary DSH_HOME bound to the one model.
+
+    The profile tree (~/.dsh/profiles, 345K of manifests whose node_modules are links
+    into the global package) is copied with its links, so nothing is installed; the
+    settings name one provider and one model; the credentials file carries only that
+    provider's key. Sessions land under the temporary home and are collected as the
+    transcript: dsh prints only the final message on stdout, but its session JSONL
+    records every tool call, result and the provider/model that answered.
+    """
+    name = "dsh"
+    stdout_name = "stdout.log"
+    key_env = {"local-high": "LOCAL_LITELLM_API_KEY", "compass-opus-high": "COMPASS_STAGE_API_KEY"}
 
     def version(self) -> str | None:
-        return command_version(self._version_argv)
+        return command_version(["dsh", "--version"])
+
+    def _real_settings(self) -> dict:
+        import yaml  # noqa: PLC0415 - only the dsh adapter needs it
+        return yaml.safe_load((DSH_HOME_REAL / "settings.yaml").read_text(encoding="utf-8")) or {}
 
     def skip_reason(self) -> str | None:
-        return self._reason
+        if self.version() is None:
+            return "dsh is not installed or --version failed"
+        if shutil.which("zstd") is None:
+            return "zstd is not installed (dsh writes its session JSONL zstd-compressed)"
+        for required in ("settings.yaml", ".credentials.yaml", "profiles/headless/package.json"):
+            if not (DSH_HOME_REAL / required).is_file():
+                return f"{DSH_HOME_REAL / required} is missing"
+        try:
+            import yaml  # noqa: F401,PLC0415
+        except ImportError:
+            return "python3 has no yaml module (needed to write the temporary settings.yaml)"
+        try:
+            dsh_settings(self._real_settings(), self.model.dsh, self.model.id)
+        except RuntimeError as exc:
+            return str(exc)
+        line, _ = dsh_credential((DSH_HOME_REAL / ".credentials.yaml").read_text(encoding="utf-8"),
+                                 self.key_env[self.model.dsh])
+        if line is None:
+            return f"{DSH_HOME_REAL / '.credentials.yaml'} has no {self.key_env[self.model.dsh]}"
+        return None
+
+    def probe(self) -> str | None:
+        blocked = endpoint_skip(self.model, litellm=False, allow_swap=self.allow_swap)
+        if blocked:
+            return blocked
+        _, key = dsh_credential((DSH_HOME_REAL / ".credentials.yaml").read_text(encoding="utf-8"),
+                                self.key_env[self.model.dsh])
+        settings = dsh_settings(self._real_settings(), self.model.dsh, self.model.id)
+        base = str(settings["llm-pi-ai"]["providers"][self.model.dsh].get("baseURL", "")).rstrip("/")
+        if self.model.local:
+            return probe_openai_chat(base[:-3] if base.endswith("/v1") else base, self.model.id, key, PROBE_TIMEOUT)
+        return probe_anthropic_messages(base, self.model.id, key or "dummy", PROBE_TIMEOUT)
+
+    def prepare(self, run: Path, repo: Path, prompt: str, token: str) -> Prepared:
+        import yaml  # noqa: PLC0415
+        home, tmp = run / "home", Path(tempfile.mkdtemp(prefix="mol-"))
+        home.mkdir()
+        dsh_home = tmp / "dsh-home"
+        dsh_home.mkdir()
+        shutil.copytree(DSH_HOME_REAL / "profiles", dsh_home / "profiles", symlinks=True)
+        settings = dsh_settings(self._real_settings(), self.model.dsh, self.model.id)
+        (dsh_home / "settings.yaml").write_text(yaml.safe_dump(settings, sort_keys=False), encoding="utf-8")
+        line, key = dsh_credential((DSH_HOME_REAL / ".credentials.yaml").read_text(encoding="utf-8"),
+                                   self.key_env[self.model.dsh])
+        credentials = dsh_home / ".credentials.yaml"
+        credentials.write_text((line or "") + "\n", encoding="utf-8")
+        credentials.chmod(0o600)
+        environment = {**base_environment(home, tmp, token), "DSH_HOME": str(dsh_home),
+                       "DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_MODE": "DISABLED"}
+        argv = ["dsh", "--profile", "headless", prompt]
+        return Prepared(argv, environment, f"dsh -> {self.model.dsh}/{self.model.id}", [key] if key else [],
+                        onboard("dsh", repo, environment))
+
+    def collect(self, run: Path, environment: dict[str, str]) -> None:
+        sessions = sorted(Path(environment["DSH_HOME"]).glob("sessions/*/*/session.jsonl*"))
+        lines: list[str] = []
+        for session in sessions:
+            if session.suffix == ".zstd":
+                result = subprocess.run(["zstd", "-dc", str(session)], capture_output=True, text=True,
+                                        stdin=subprocess.DEVNULL, check=False)
+                lines.extend(result.stdout.splitlines())
+            else:
+                lines.extend(session.read_text(encoding="utf-8", errors="replace").splitlines())
+        (run / "transcript.jsonl").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        (run / "sessions.txt").write_text("\n".join(str(s) for s in sessions) + "\n", encoding="utf-8")
 
 
-HARNESSES: dict[str, Harness] = {
-    "pi": Pi(),
-    "prime": Prime(),
-    "codex": Codex(),
-    "claude": Claude(),
-    "dsh": Unsupported("dsh", ["dsh", "--version"], (
-        "no local backend within the boundaries: dsh has no per-run model flag and takes its model from "
-        "$DSH_HOME/settings.yaml (default zai/glm-5.3-flash, off-host); switching it means editing the real "
-        "~/.dsh/settings.yaml, and a temporary DSH_HOME re-installs the profile plugins with pnpm (network) "
-        "while the real one writes sessions under ~/.dsh")),
-}
+def make_harnesses(model: Model, allow_swap: bool = False) -> dict[str, Harness]:
+    return {name: cls(model, allow_swap) for name, cls in
+            (("pi", Pi), ("prime", Prime), ("codex", Codex), ("claude", Claude), ("dsh", Dsh))}
 
 
-def check_allowlist(harness: str, argv: list[str], environment: dict[str, str]) -> None:
-    flag, value = ALLOWED_MODELS[harness]
+def check_allowlist(harness: str, argv: list[str], environment: dict[str, str], model: Model) -> None:
+    """Refuse to launch anything that is not bound to the campaign's one model."""
     if harness == "claude":
-        wrong = {v: environment.get(v) for v in CLAUDE_MODEL_VARIABLES if environment.get(v) != LOCAL_MODEL}
+        wrong = {v: environment.get(v) for v in CLAUDE_MODEL_VARIABLES if environment.get(v) != model.claude}
         if wrong or environment.get("ANTHROPIC_BASE_URL") != SHIM:
-            raise RuntimeError(f"refusing to launch claude: every model slot must be {LOCAL_MODEL} via {SHIM}: {wrong}")
-    if flag == "variant":
-        if argv[:2] != ["prime", value]:
-            raise RuntimeError(f"refusing to launch {argv[:2]}: only `prime {value}` is allowed")
+            raise RuntimeError(f"refusing to launch claude: every model slot must be {model.claude} via {SHIM}: {wrong}")
+        if argv.count("--model") != 1 or argv[argv.index("--model") + 1] != model.claude:
+            raise RuntimeError(f"refusing to launch claude: --model must be exactly {model.claude}")
+    elif harness == "prime":
+        variant, _ = model.prime
+        if argv[:2] != ["prime", variant]:
+            raise RuntimeError(f"refusing to launch {argv[:2]}: only `prime {variant}` is allowed")
         if "--model" in argv or "--provider" in argv:
             raise RuntimeError("refusing to override the prime variant's model")
-    elif argv.count(flag) != 1 or argv[argv.index(flag) + 1] != value:
-        raise RuntimeError(f"refusing to launch: {harness} model must be exactly {value}")
+    elif harness == "pi":
+        _, value = model.pi
+        if argv.count("--model") != 1 or argv[argv.index("--model") + 1] != value or "--provider" in argv:
+            raise RuntimeError(f"refusing to launch: pi model must be exactly {value}")
+    elif harness == "codex":
+        if not model.local or argv.count("-m") != 1 or argv[argv.index("-m") + 1] != model.id:
+            raise RuntimeError(f"refusing to launch: codex model must be exactly {model.id} (local only)")
+    elif harness == "dsh":
+        dsh_home = environment.get("DSH_HOME", "")
+        if not dsh_home or dsh_home.startswith(str(DSH_HOME_REAL)) or "--patch" in argv or "--profile" not in argv \
+                or argv[argv.index("--profile") + 1] != "headless":
+            raise RuntimeError("refusing to launch dsh: it must run the headless profile from a temporary DSH_HOME")
+        try:
+            import yaml  # noqa: PLC0415
+            settings = yaml.safe_load(Path(dsh_home, "settings.yaml").read_text(encoding="utf-8")) or {}
+        except (OSError, ImportError) as exc:
+            raise RuntimeError(f"refusing to launch dsh: cannot read the temporary settings: {exc}") from exc
+        default = settings.get("agent-default-model") or {}
+        providers = ((settings.get("llm-pi-ai") or {}).get("providers") or {})
+        if (default.get("provider"), default.get("model")) != (model.dsh, model.id) or set(providers) != {model.dsh}:
+            raise RuntimeError(f"refusing to launch dsh: settings must bind exactly {model.dsh}/{model.id}: "
+                               f"{default} providers={sorted(providers)}")
+    else:
+        raise RuntimeError(f"unknown harness {harness}")
 
 
 # ── one run ───────────────────────────────────────────────────────────────────
@@ -421,9 +781,9 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
     pristine_checkout(run, execution=mode == "auto")
     prompt = PROMPTS[mode].format(invocation=EXPLICIT[harness.name])
     prepared = harness.prepare(run, repo, prompt, token)
-    check_allowlist(harness.name, prepared.argv, prepared.environment)
-    summary.update(model=prepared.model, argv=prepared.argv[:-1] + ["<prompt>"], prompt=prompt,
-                   onboarding=prepared.onboarding)
+    check_allowlist(harness.name, prepared.argv, prepared.environment, harness.model)
+    summary.update(model=prepared.model, model_id=harness.model.id, argv=prepared.argv[:-1] + ["<prompt>"],
+                   prompt=prompt, onboarding=prepared.onboarding)
     stub_log = run / "harness-stub-specstride.jsonl"
     exec_stub_log = run / "harness-exec-stub-specstride.jsonl"
     environment = {**prepared.environment, "MOL_STUB_LOG": str(stub_log)}
@@ -434,7 +794,7 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
     reaped: list = []
     left: list = []
     try:
-        with (run / "transcript.jsonl").open("w", encoding="utf-8") as out, \
+        with (run / harness.stdout_name).open("w", encoding="utf-8") as out, \
                 (run / "stderr.log").open("w", encoding="utf-8") as err:
             process = subprocess.Popen(prepared.argv, cwd=repo, env=environment, stdin=subprocess.DEVNULL,
                                        stdout=out, stderr=err, start_new_session=True)
@@ -456,11 +816,18 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
         # Reached on success, timeout, SIGINT and SIGTERM alike.
         reaped, left = reap(token)
         tmp = Path(environment["TMPDIR"])
+        try:
+            harness.collect(run, environment)
+        except (OSError, subprocess.SubprocessError) as exc:
+            (run / "collect-error.log").write_text(str(exc), encoding="utf-8")
         shutil.rmtree(tmp, ignore_errors=True)
     summary["duration_seconds"] = round(time.monotonic() - started, 1)
     summary.update(exit_code=exit_code, timed_out=timed_out, reaped=reaped, left_over=left)
 
-    transcript = mol_e2e.PARSERS[harness.name]((run / "transcript.jsonl").read_text(encoding="utf-8").splitlines())
+    transcript_path = run / "transcript.jsonl"
+    if not transcript_path.exists():
+        transcript_path.write_text("", encoding="utf-8")
+    transcript = mol_e2e.PARSERS[harness.name](transcript_path.read_text(encoding="utf-8").splitlines())
     stub_calls = [json.loads(line) for line in stub_log.read_text(encoding="utf-8").splitlines()] \
         if stub_log.exists() else []
     exec_stub_calls = [json.loads(line) for line in
@@ -484,6 +851,10 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
                                                  if other != run_id]])
     verdicts = mol_e2e.evaluate(context)
     verdicts.append(mol_e2e.verdict("no-processes-left", not left, f"reaped {len(reaped)}; left {left}"))
+    if transcript.models:
+        # The harness recorded which provider/model answered: it must be the campaign's one model.
+        verdicts.append(mol_e2e.verdict("model-pinned", set(transcript.models) == {harness.model.id},
+                                        f"answered by {sorted(transcript.models)}; configured {harness.model.id}"))
     contract = mol_e2e.locate_contract(repo, transcript)
     summary["contract"] = str(contract) if contract else None
     summary["launchers"] = [str(p) for p in mol_e2e.locate_launchers(repo)]
@@ -501,8 +872,37 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
     if redaction["remaining"]:
         summary["verdicts"].append(mol_e2e.verdict("evidence-redacted", False, str(redaction)))
         summary["status"] = "fail"
+    if summary["status"] == "fail":
+        infra = infra_reason(transcript, (run / "stderr.log").read_text(encoding="utf-8", errors="replace"),
+                             (run / harness.stdout_name).read_text(encoding="utf-8", errors="replace")
+                             if harness.stdout_name != "transcript.jsonl" else "")
+        if infra:
+            summary["status"], summary["infra_reason"] = "infra", infra
     (run / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return summary
+
+
+def infra_reason(transcript: mol_e2e.Transcript, stderr: str, stdout: str = "") -> str | None:
+    """Why a failed run is the serving stack's, not the skill's or the harness's; None if it is not.
+
+    A run whose model never produced a contract because its requests died upstream tells
+    nothing about the skill. Evidence: the harness's own terminal error, a tool result or
+    stderr line matching INFRA_PATTERNS, or a run that ended without a single tool call
+    while stderr shows a transport error. A run that made tool calls and then failed a
+    verdict is a real failure even if some request was retried along the way.
+    """
+    error = transcript.error_message or ""
+    if INFRA_PATTERNS.search(error):
+        return f"harness terminal error: {error[:200]}"
+    haystack = "\n".join([stderr[-20000:], stdout[-5000:]])
+    match = INFRA_PATTERNS.search(haystack)
+    if match and not transcript.calls:
+        line = next((ln for ln in haystack.splitlines() if match.group(0) in ln), match.group(0))
+        return f"no tool call was made and the route failed: {line.strip()[:200]}"
+    upstream = [c for c in transcript.calls if c.is_error and INFRA_PATTERNS.search(c.result or "")]
+    if upstream and not any(c.is_error is False for c in transcript.calls if c.kind == "shell"):
+        return f"every shell call failed upstream: {upstream[0].result[:200]!r}"
+    return None
 
 
 def checkout_state() -> dict[str, str]:
@@ -567,7 +967,7 @@ def run_tier(name: str, evidence: Path) -> dict:
 
 # ── reporting ─────────────────────────────────────────────────────────────────
 
-COLORS = {"pass": "\033[32m", "fail": "\033[31m", "skip": "\033[33m"}
+COLORS = {"pass": "\033[32m", "fail": "\033[31m", "skip": "\033[33m", "infra": "\033[35m"}
 
 
 def paint(status: str, color: bool) -> str:
@@ -615,11 +1015,17 @@ def print_report(report: dict, color: bool) -> None:
     for run in report["runs"]:
         if run["status"] == "skip":
             detail = run.get("reason", "")
+        elif run["status"] == "infra":
+            detail = "infra: " + str(run.get("infra_reason") or run.get("reason", ""))
         else:
             failed = [v["name"] for v in run.get("verdicts", []) if v["status"] == "fail"]
             detail = ("failed: " + ", ".join(failed)) if failed else f"{sum(v['status'] == 'pass' for v in run['verdicts'])} assertions passed"
+        attempt = f" (attempt {run['attempt']})" if run.get("attempt", 1) > 1 else ""
         print(f"  {run['harness']:<7} {run['mode']:<9} {run['fixture']:<17} {paint(run['status'], color):<6} "
-              f"{run.get('duration_seconds', ''):>6}  {detail}")
+              f"{run.get('duration_seconds', ''):>6}  {detail}{attempt}")
+    superseded = report.get("superseded_runs", [])
+    if superseded:
+        print(f"  ({len(superseded)} infra attempt(s) retried; kept in report.json under superseded_runs)")
     for row in report.get("cross_harness", []):
         print(f"  cross-harness {row['fixture']:<17} {paint(row['status'], color):<6} runs={len(row['runs'])} "
               f"differing={row['differing'] or 'none'}")
@@ -629,7 +1035,8 @@ def reevaluate(evidence: Path) -> int:
     """Recompute verdicts from a saved transcript and repository. Facts that only the live
     run could observe (timeout, exit status, reaped processes, home and checkout snapshots,
     stub calls) are carried over from the original summary, never recomputed."""
-    carried = ("real-homes-unchanged", "checkout-unchanged", "no-processes-left", "evidence-redacted")
+    carried = ("real-homes-unchanged", "checkout-unchanged", "no-processes-left", "evidence-redacted",
+               "model-pinned")
     runs = []
     for summary_path in sorted(evidence.glob("*/summary.json")):
         old = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -666,6 +1073,9 @@ def reevaluate(evidence: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--harness", default="all", help="pi|prime|codex|claude|dsh|all, or a comma list")
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=MODEL_CHOICES,
+                        help=f"the one model every harness is bound to (default {DEFAULT_MODEL}); "
+                             "`compass` is claude-opus-4.8 through the local shim, as plain `bebop`")
     parser.add_argument("--mode", default="both",
                         choices=("explicit", "implicit", "auto", "both", "all"),
                         help="both: explicit and implicit generation; all: those plus auto")
@@ -673,6 +1083,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=None,
                         help=f"wall-clock seconds per harness run (default: {DEFAULT_TIMEOUT}, "
                              f"or {AUTO_TIMEOUT} in auto mode)")
+    parser.add_argument("--retry-infra", type=int, default=1, metavar="N",
+                        help="re-run a cell that ended as `infra` up to N more times once its route probes "
+                             "clean again (default 1; 0 disables)")
+    parser.add_argument("--allow-swap", action="store_true",
+                        help="run even if llama-swap has a different model loaded (forces a swap)")
+    parser.add_argument("--no-probe", action="store_true",
+                        help="skip the one-completion route probe before each harness (not recommended)")
     parser.add_argument("--evidence-dir", help="default: a new temporary directory (never inside the repository)")
     parser.add_argument("--skip-tiers", action="store_true", help="do not run Tiers 1 and 2 first")
     parser.add_argument("--reevaluate", metavar="EVIDENCE_DIR",
@@ -682,8 +1099,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.reevaluate:
         return reevaluate(Path(args.reevaluate))
 
+    model = Model(args.model)
+    harnesses = make_harnesses(model, args.allow_swap)
     names = HARNESS_NAMES if args.harness == "all" else tuple(args.harness.split(","))
-    unknown = [n for n in names if n not in HARNESSES]
+    unknown = [n for n in names if n not in harnesses]
     if unknown:
         parser.error(f"unknown harness: {', '.join(unknown)}")
     modes = {"both": ("explicit", "implicit"),
@@ -699,32 +1118,65 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, interrupted)
 
     report: dict = {"evidence_dir": str(evidence), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    "tiers": [], "runs": []}
+                    "model": {"choice": model.choice, "id": model.id, "local": model.local},
+                    "tiers": [], "runs": [], "probes": [], "superseded_runs": []}
     if not args.skip_tiers:
         report["tiers"] = [run_tier("tier1", evidence), run_tier("tier2", evidence)]
     live = os.environ.get("MOL_LIVE_E2E") == "1"
     snapshot = home_snapshot.take() if live else None
     if snapshot is not None:
         home_snapshot.write(snapshot, evidence / "home-snapshot-before.json")
+
+    def probe(harness: Harness) -> str | None:
+        """The route's own answer, recorded; None when it answered."""
+        if args.no_probe:
+            return None
+        started = time.monotonic()
+        finding = harness.probe()
+        report["probes"].append({"harness": harness.name, "model": model.id, "ok": finding is None,
+                                 "detail": finding, "seconds": round(time.monotonic() - started, 1)})
+        print(f"probe {harness.name} -> {model.id}: {'answered' if finding is None else finding}",
+              file=sys.stderr, flush=True)
+        return finding
+
     try:
         for name in names:
-            harness = HARNESSES[name]
+            harness = harnesses[name]
             reason = None if live else "MOL_LIVE_E2E=1 is not set (live runs are opt-in)"
             reason = reason or harness.skip_reason()
+            infra = probe(harness) if live and not reason else None
             for fixture in fixtures:
                 for mode in modes:
                     base = {"run": f"{name}-{mode}-{fixture}", "harness": name, "mode": mode, "fixture": fixture,
-                            "version": harness.version()}
+                            "version": harness.version(), "model_id": model.id}
                     if reason:
                         report["runs"].append({**base, "status": "skip", "reason": reason})
                         continue
                     timeout = args.timeout or (AUTO_TIMEOUT if mode == "auto" else DEFAULT_TIMEOUT)
-                    print(f"running {base['run']} (timeout {timeout}s) ...", file=sys.stderr, flush=True)
-                    try:
-                        report["runs"].append(run_one(harness, mode, fixture, evidence, timeout, snapshot))
-                    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-                        report["runs"].append({**base, "status": "fail", "reason": f"runner error: {exc}",
-                                               "verdicts": [mol_e2e.verdict("runner", False, str(exc))]})
+                    attempt = 0
+                    while True:
+                        attempt += 1
+                        if infra:
+                            result = {**base, "status": "infra", "infra_reason": f"route probe: {infra}",
+                                      "attempt": attempt}
+                        else:
+                            print(f"running {base['run']} (timeout {timeout}s, attempt {attempt}) ...",
+                                  file=sys.stderr, flush=True)
+                            try:
+                                result = {**run_one(harness, mode, fixture, evidence, timeout, snapshot),
+                                          "attempt": attempt}
+                            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                                result = {**base, "status": "fail", "reason": f"runner error: {exc}",
+                                          "verdicts": [mol_e2e.verdict("runner", False, str(exc))], "attempt": attempt}
+                        if result["status"] != "infra" or attempt > args.retry_infra:
+                            break
+                        # The stack failed, not the skill: give it a moment, re-probe, and try the cell again.
+                        report["superseded_runs"].append(result)
+                        if result.get("run") and (evidence / result["run"]).exists():
+                            (evidence / result["run"]).rename(evidence / f"{result['run']}-attempt{attempt}")
+                        time.sleep(30)
+                        infra = probe(harness)
+                    report["runs"].append(result)
     except KeyboardInterrupt:
         report["interrupted"] = True
     report["cross_harness"] = cross_harness(report["runs"])
@@ -732,7 +1184,8 @@ def main(argv: list[str] | None = None) -> int:
         report["home_changes_final"] = home_snapshot.diff(snapshot, home_snapshot.take())
     (evidence / "report.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     print_report(report, sys.stdout.isatty() and "NO_COLOR" not in os.environ)
-    failed = (any(t["status"] == "fail" for t in report["tiers"]) or any(r["status"] == "fail" for r in report["runs"])
+    failed = (any(t["status"] == "fail" for t in report["tiers"])
+              or any(r["status"] in ("fail", "infra") for r in report["runs"])
               or any(r["status"] == "fail" for r in report["cross_harness"]) or report.get("interrupted")
               or bool(report.get("home_changes_final")))
     return 1 if failed else 0

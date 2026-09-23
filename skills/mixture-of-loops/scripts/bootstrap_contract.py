@@ -187,6 +187,50 @@ def shell_candidates(path: Path, root: Path) -> list[dict]:
     return candidates
 
 
+PREREQUISITE_ID_RE = re.compile(r"\b(PRE-\d+)\b")
+PREREQUISITE_HEADING_RE = re.compile(r"^#{1,6}\s.*prerequisite", re.IGNORECASE)
+BACKTICK_PATH_RE = re.compile(r"`([^`\s]+)`")
+
+
+def prerequisite_candidates(path: Path, root: Path) -> list[dict]:
+    """Every path a source names beside a prerequisite id or under a prerequisites heading,
+    resolved against the repository root and checked for existence.
+
+    A model reading "`approvals/release-approval.json` must exist" has to decide what the
+    path is relative to; a local model resolved it against the feature directory and
+    blocked a ready repository. The bootstrap answers that once, deterministically: the
+    path as written, where it resolves under `repository.root`, and whether it is there.
+    Only existence is recorded; whether the item is non-delegable authority, and what
+    blocks when it is absent, remains a semantic finding.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    candidates: list[dict] = []
+    in_section = False
+    for line_number, raw in enumerate(lines, 1):
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            in_section = bool(PREREQUISITE_HEADING_RE.match(stripped))
+            continue
+        ids = PREREQUISITE_ID_RE.findall(stripped)
+        if not ids and not in_section:
+            continue
+        for token in BACKTICK_PATH_RE.findall(stripped):
+            if "/" not in token and "." not in token:
+                continue
+            if token.startswith(("-", "--")) or " " in token:
+                continue
+            resolved = (root / token).resolve() if not Path(token).is_absolute() else Path(token)
+            candidates.append({
+                "id": ids[0] if ids else None,
+                "source": {"path": relative_or_absolute(path, root), "line": line_number,
+                           "anchor": ids[0] if ids else "prerequisites"},
+                "path": token,
+                "resolved": relative_or_absolute(resolved, root),
+                "present": resolved.exists(),
+            })
+    return candidates
+
+
 def verification_document(path: Path, root: Path) -> dict:
     record: dict = {"path": relative_or_absolute(path, root), "valid_json": False}
     try:
@@ -231,6 +275,7 @@ def build_contract(root: Path, features: list[Path]) -> dict:
     all_tasks = []
     feature_records = []
     candidates = []
+    prerequisites = []
     verification = []
     for path, kind in source_files(root, features):
         try:
@@ -248,6 +293,8 @@ def build_contract(root: Path, features: list[Path]) -> dict:
         sources.append(source)
         if path.name in {"plan.md", "quickstart.md"}:
             candidates.extend(shell_candidates(path, root))
+        if path.suffix == ".md":
+            prerequisites.extend(prerequisite_candidates(path, root))
         if path.name == "verification-commands.json":
             verification.append(verification_document(path, root))
 
@@ -305,6 +352,7 @@ def build_contract(root: Path, features: list[Path]) -> dict:
         "inventory": {
             "tasks": all_tasks,
             "shell_candidates": candidates,
+            "prerequisites": prerequisites,
             "verification_documents": verification,
         },
         "configuration": {

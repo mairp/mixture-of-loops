@@ -9,7 +9,9 @@ The launch contract is pipeline data. It does not replace Specstride's verificat
 
 - `schema_version`: `"1.0"`.
 - `id`: stable kebab-case pipeline identifier.
-- `status`: `draft` or `validated`.
+- `status`: `draft` or `validated`. The bootstrap writes `draft`; only
+  `validate_contract.py --promote` writes `validated`, and only when strict validation
+  passes. A contract with an open `blocker` finding stays `draft`.
 - `repository.root`: absolute repository root used to resolve relative paths.
 - `authorized_roots`: absolute roots under which stage working directories may resolve.
 - `sources`: relative or absolute source paths with SHA-256 digests and kinds. A path
@@ -19,6 +21,10 @@ The launch contract is pipeline data. It does not replace Specstride's verificat
 - `coverage`: execution obligations with source, classification, disposition, mappings,
   rationale, and evidence expectation.
 - `findings`: findings with `severity`, `status`, provenance, and resolution.
+- `inventory.prerequisites` (bootstrap-derived): every path a source names beside a
+  `PRE-` id or under a prerequisites heading — as written, resolved against
+  `repository.root`, and whether it is `present`. Existence only; what it means is a
+  finding.
 - `stages`: dependency-ordered stage records.
 
 The renderer accepts only `validated` contracts with current source hashes and no open

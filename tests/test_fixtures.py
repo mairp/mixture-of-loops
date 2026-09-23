@@ -69,6 +69,58 @@ class FixtureTests(unittest.TestCase):
                 self.assertEqual(mol_e2e.run_script("validate_contract.py", repo / "launch-contract.json",
                                                     "--allow-draft", cwd=repo).returncode, 0)
 
+    def test_bootstrap_resolves_prerequisite_paths_against_the_repository_root(self) -> None:
+        for fixture in mol_e2e.FIXTURE_NAMES:
+            with self.subTest(fixture=fixture):
+                expected = mol_e2e.expectations(fixture)["prerequisite"]
+                repo, draft = self.bootstrap(self.workspace(), fixture)
+                entries = draft["inventory"]["prerequisites"]
+                self.assertEqual(len(entries), 1, entries)
+                entry = entries[0]
+                self.assertEqual((entry["id"], entry["path"], entry["resolved"], entry["present"]),
+                                 (expected["id"], expected["file"], expected["file"], expected["present"]))
+                self.assertEqual((entry["source"]["path"], entry["source"]["line"], entry["source"]["anchor"]),
+                                 (expected["path"], expected["line"], expected["id"]))
+                # the same path named from the feature directory would be the wrong base
+                self.assertFalse((repo / expected["path"]).parent.joinpath(expected["file"]).exists())
+
+    def test_promote_owns_the_status_field(self) -> None:
+        # blocked: a hand-set `validated` on a contract with an open blocker is undone and refused
+        base = self.workspace()
+        repo, draft = self.bootstrap(base, "greeting-blocked")
+        contract = repo / "launch-contract.json"
+        blocked = mol_e2e.reference_contract(draft, "greeting-blocked")
+        blocked["status"] = "validated"
+        contract.write_text(json.dumps(blocked, indent=2), encoding="utf-8")
+        result = mol_e2e.run_script("validate_contract.py", "--promote", contract, cwd=repo)
+        self.assertEqual(result.returncode, 20, result.stderr)
+        self.assertIn("open blocker", result.stderr)
+        self.assertIn("status set back to draft", result.stderr)
+        self.assertEqual(json.loads(contract.read_text(encoding="utf-8"))["status"], "draft")
+        # promoting again changes nothing and still refuses
+        result = mol_e2e.run_script("validate_contract.py", "--promote", contract, cwd=repo)
+        self.assertEqual(result.returncode, 20)
+        self.assertNotIn("status set back", result.stderr)
+        self.assertEqual(json.loads(contract.read_text(encoding="utf-8"))["status"], "draft")
+        # ready: a correct draft is promoted, the file says validated, and the renderer accepts it
+        base = self.workspace()
+        repo, draft = self.bootstrap(base, "greeting-ready")
+        contract = repo / "launch-contract.json"
+        ready = mol_e2e.reference_contract(draft, "greeting-ready")
+        ready["status"] = "draft"
+        contract.write_text(json.dumps(ready, indent=2), encoding="utf-8")
+        result = mol_e2e.run_script("validate_contract.py", "--promote", contract, cwd=repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("promoted to validated", result.stdout)
+        self.assertEqual(json.loads(contract.read_text(encoding="utf-8"))["status"], "validated")
+        self.assertEqual(mol_e2e.run_script("validate_contract.py", contract, cwd=repo).returncode, 0)
+        self.assertEqual(mol_e2e.run_script("validate_contract.py", "--promote", contract, cwd=repo).returncode, 0)
+        rendered = mol_e2e.run_script("render_launcher.py", "--contract", contract,
+                                      "--output", repo / "run.sh", cwd=repo)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        exclusive = mol_e2e.run_script("validate_contract.py", "--promote", "--allow-draft", contract, cwd=repo)
+        self.assertEqual(exclusive.returncode, 2)
+
     def test_reference_completion_has_exactly_one_correct_outcome(self) -> None:
         for fixture in mol_e2e.FIXTURE_NAMES:
             with self.subTest(fixture=fixture):
