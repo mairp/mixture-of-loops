@@ -33,6 +33,13 @@ with a unique MOL_E2E_RUN value and every process still carrying it is reaped
 afterwards (`prime-agent shutdown` is host-wide and is never called). The real
 ~/.pi, ~/.prime, ~/.agents, ~/.dsh and ~/.claude/skills are snapshotted before
 and compared after every run.
+
+Each run also gets its own temporary root -- a fresh `mkdtemp`, outside the
+evidence directory and sharing no ancestor with any other run's root below the
+system temp dir. The harness's cwd and HOME-like directories live there, so a
+model that lists its parent directory finds only its own run, never a sibling's
+or the evidence directory's. That root is moved into the evidence directory,
+and only then removed, once the process group is gone.
 """
 
 from __future__ import annotations
@@ -228,6 +235,32 @@ def pristine_checkout(run: Path, *, execution: bool = False) -> Path:
     if mol_e2e.tree_state(checkout / "skills" / mol_e2e.NAME) != canonical:
         raise RuntimeError("the pristine copy differs from the canonical package")
     return checkout
+
+
+def run_root() -> Path:
+    """A fresh temporary root for one run. Always a direct child of the system temp
+    directory (never of the evidence directory or of another run's root), so two
+    runs' roots share no ancestor closer than the system temp dir itself."""
+    return Path(tempfile.mkdtemp(prefix="mol-e2e-run-"))
+
+
+def archive(root: Path, dest: Path, *, keep: bool = False) -> None:
+    """Move (or, with `keep`, copy) one run's temporary root into its place in the
+    evidence directory -- called only after the harness's process group is gone.
+
+    Byte-for-byte: nothing under `root` is rewritten. The model's own artifacts (a
+    contract, a rendered launcher carrying its own contract-sha256/generated-content-
+    sha256) must stay exactly what the model produced, or the grader would be scoring
+    bytes the model never wrote and the launcher's self-digest would break -- and
+    validate_contract.py hashes sources under whatever `repository.root` the contract
+    itself recorded, so a path swapped in memory would not even reach it. Instead,
+    summary.json's own "root" field (written before this is called) records where
+    `root` was, so --reevaluate can materialise a copy back at that exact path before
+    grading -- see reevaluate()."""
+    if keep:
+        shutil.copytree(root, dest)
+    else:
+        shutil.move(str(root), str(dest))
 
 
 def base_environment(home: Path, tmp: Path, token: str) -> dict[str, str]:
@@ -811,117 +844,140 @@ def check_allowlist(harness: str, argv: list[str], environment: dict[str, str], 
 # ── one run ───────────────────────────────────────────────────────────────────
 
 def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: int,
-            snapshot_before: dict[str, str]) -> dict:
+            snapshot_before: dict[str, str], run_roots: list[Path], keep: bool = False) -> dict:
     run_id = f"{harness.name}-{mode}-{fixture}"
-    run = evidence / run_id
-    run.mkdir(parents=True)
-    repo = mol_e2e.prepare_fixture(fixture, run / "repo")
-    token = uuid.uuid4().hex
-    summary: dict = {"run": run_id, "harness": harness.name, "mode": mode, "fixture": fixture,
-                     "version": harness.version(), "transcript": str(run / "transcript.jsonl"),
-                     "stderr": str(run / "stderr.log"), "repo": str(repo)}
-    checkout_before = checkout_state()
-    pristine_checkout(run, execution=mode == "auto")
-    prompt = PROMPTS[mode].format(invocation=EXPLICIT[harness.name])
-    prepared = harness.prepare(run, repo, prompt, token)
-    check_allowlist(harness.name, prepared.argv, prepared.environment, harness.model)
-    summary.update(model=prepared.model, model_id=harness.model.id, argv=prepared.argv[:-1] + ["<prompt>"],
-                   prompt=prompt, onboarding=prepared.onboarding)
-    stub_log = run / "harness-stub-specstride.jsonl"
-    exec_stub_log = run / "harness-exec-stub-specstride.jsonl"
-    environment = {**prepared.environment, "MOL_STUB_LOG": str(stub_log)}
-    if mode == "auto":
-        environment.update(EXECUTION_STUB_ENV, MOL_EXEC_STUB_LOG=str(exec_stub_log))
-    timed_out, exit_code = False, None
-    started = time.monotonic()
-    reaped: list = []
-    left: list = []
+    dest = evidence / run_id
+    if dest.exists():
+        raise RuntimeError(f"evidence for {run_id} already exists at {dest}")
+    root = run_root()
+    run_roots.append(root)
     try:
-        with (run / harness.stdout_name).open("w", encoding="utf-8") as out, \
-                (run / "stderr.log").open("w", encoding="utf-8") as err:
-            process = subprocess.Popen(prepared.argv, cwd=repo, env=environment, stdin=subprocess.DEVNULL,
-                                       stdout=out, stderr=err, start_new_session=True)
-            try:
-                exit_code = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    try:
-                        os.killpg(process.pid, sig)
-                    except ProcessLookupError:
-                        break
-                    try:
-                        exit_code = process.wait(timeout=10)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-    finally:
-        # Reached on success, timeout, SIGINT and SIGTERM alike.
-        reaped, left = reap(token)
-        tmp = Path(environment["TMPDIR"])
+        repo = mol_e2e.prepare_fixture(fixture, root / "repo")
+        token = uuid.uuid4().hex
+        summary: dict = {"run": run_id, "harness": harness.name, "mode": mode, "fixture": fixture,
+                         "version": harness.version(), "transcript": str(root / "transcript.jsonl"),
+                         "stderr": str(root / "stderr.log"), "repo": str(repo),
+                         # This run's original temporary root: everything below is moved into the
+                         # evidence directory byte-for-byte, so any absolute path the model itself
+                         # recorded under this root (a contract's repository.root, for one) is still
+                         # this value, not where the evidence ends up. --reevaluate materialises a
+                         # copy back at exactly this path before grading; see reevaluate().
+                         "root": str(root)}
+        checkout_before = checkout_state()
+        pristine_checkout(root, execution=mode == "auto")
+        prompt = PROMPTS[mode].format(invocation=EXPLICIT[harness.name])
+        prepared = harness.prepare(root, repo, prompt, token)
+        check_allowlist(harness.name, prepared.argv, prepared.environment, harness.model)
+        summary.update(model=prepared.model, model_id=harness.model.id, argv=prepared.argv[:-1] + ["<prompt>"],
+                       prompt=prompt, onboarding=prepared.onboarding)
+        stub_log = root / "harness-stub-specstride.jsonl"
+        exec_stub_log = root / "harness-exec-stub-specstride.jsonl"
+        environment = {**prepared.environment, "MOL_STUB_LOG": str(stub_log)}
+        if mode == "auto":
+            environment.update(EXECUTION_STUB_ENV, MOL_EXEC_STUB_LOG=str(exec_stub_log))
+        timed_out, exit_code = False, None
+        started = time.monotonic()
+        reaped: list = []
+        left: list = []
         try:
-            harness.collect(run, environment)
-        except (OSError, subprocess.SubprocessError) as exc:
-            (run / "collect-error.log").write_text(str(exc), encoding="utf-8")
-        shutil.rmtree(tmp, ignore_errors=True)
-    summary["duration_seconds"] = round(time.monotonic() - started, 1)
-    summary.update(exit_code=exit_code, timed_out=timed_out, timeout_seconds=timeout, reaped=reaped, left_over=left)
+            with (root / harness.stdout_name).open("w", encoding="utf-8") as out, \
+                    (root / "stderr.log").open("w", encoding="utf-8") as err:
+                process = subprocess.Popen(prepared.argv, cwd=repo, env=environment, stdin=subprocess.DEVNULL,
+                                           stdout=out, stderr=err, start_new_session=True)
+                try:
+                    exit_code = process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    for sig in (signal.SIGTERM, signal.SIGKILL):
+                        try:
+                            os.killpg(process.pid, sig)
+                        except ProcessLookupError:
+                            break
+                        try:
+                            exit_code = process.wait(timeout=10)
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+        finally:
+            # Reached on success, timeout, SIGINT and SIGTERM alike.
+            reaped, left = reap(token)
+            tmp = Path(environment["TMPDIR"])
+            try:
+                harness.collect(root, environment)
+            except (OSError, subprocess.SubprocessError) as exc:
+                (root / "collect-error.log").write_text(str(exc), encoding="utf-8")
+            shutil.rmtree(tmp, ignore_errors=True)
+        summary["duration_seconds"] = round(time.monotonic() - started, 1)
+        summary.update(exit_code=exit_code, timed_out=timed_out, timeout_seconds=timeout, reaped=reaped, left_over=left)
 
-    transcript_path = run / "transcript.jsonl"
-    if not transcript_path.exists():
-        transcript_path.write_text("", encoding="utf-8")
-    transcript = mol_e2e.PARSERS[harness.name](transcript_path.read_text(encoding="utf-8").splitlines())
-    stub_calls = [json.loads(line) for line in stub_log.read_text(encoding="utf-8").splitlines()] \
-        if stub_log.exists() else []
-    exec_stub_calls = [json.loads(line) for line in
-                       exec_stub_log.read_text(encoding="utf-8").splitlines()] \
-        if exec_stub_log.exists() else []
-    home_changes = home_snapshot.diff(snapshot_before, home_snapshot.take())
-    checkout_after = checkout_state()
-    checkout_changed = [f"{k}: {checkout_before.get(k)} -> {checkout_after.get(k)}"
-                        for k in sorted(set(checkout_before) | set(checkout_after))
-                        if checkout_before.get(k) != checkout_after.get(k)]
-    context = mol_e2e.RunContext(harness=harness.name, mode=mode, fixture=fixture, repo=repo,
-                                 transcript=transcript, timed_out=timed_out, exit_code=exit_code,
-                                 home_changes=home_changes, checkout_changed=checkout_changed,
-                                 harness_stub_calls=stub_calls,
-                                 execution_stub_calls=exec_stub_calls,
-                                 expect_execution=mode == "auto", work=run,
-                                 grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
-                                               "mol_e2e", "expectations/greeting", "reference_contract",
-                                               "summary.json", "report.json", "home-snapshot",
-                                               *[str(evidence / other) for other in os.listdir(evidence)
-                                                 if other != run_id]])
-    verdicts = mol_e2e.evaluate(context)
-    verdicts.append(mol_e2e.verdict("no-processes-left", not left, f"reaped {len(reaped)}; left {left}"))
-    if transcript.models:
-        # The harness recorded which provider/model answered: it must be the campaign's one model.
-        verdicts.append(mol_e2e.verdict("model-pinned", set(transcript.models) == {harness.model.id},
-                                        f"answered by {sorted(transcript.models)}; configured {harness.model.id}"))
-    contract = mol_e2e.locate_contract(repo, transcript)
-    summary["contract"] = str(contract) if contract else None
-    summary["launchers"] = [str(p) for p in mol_e2e.locate_launchers(repo)]
-    if contract:
-        summary["deterministic_facts"] = mol_e2e.deterministic_facts(
-            json.loads(contract.read_text(encoding="utf-8")), repo)
-    summary["tool_calls"] = [{"tool": c.tool, "via": c.via, "kind": c.kind, "error": c.is_error,
-                              "text": c.text[:400]} for c in transcript.calls]
-    summary["stop_reason"] = transcript.stop_reason
-    summary["error_message"] = transcript.error_message
-    summary["verdicts"] = verdicts
-    summary["status"] = mol_e2e.summarize(verdicts)
-    redaction = redact(run, prepared.secrets)
-    summary["redaction"] = redaction
-    if redaction["remaining"]:
-        summary["verdicts"].append(mol_e2e.verdict("evidence-redacted", False, str(redaction)))
-        summary["status"] = "fail"
-    if summary["status"] == "fail":
-        infra = infra_reason(transcript, (run / "stderr.log").read_text(encoding="utf-8", errors="replace"),
-                             (run / harness.stdout_name).read_text(encoding="utf-8", errors="replace")
-                             if harness.stdout_name != "transcript.jsonl" else "")
-        if infra:
-            summary["status"], summary["infra_reason"] = "infra", infra
-    (run / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+        transcript_path = root / "transcript.jsonl"
+        if not transcript_path.exists():
+            transcript_path.write_text("", encoding="utf-8")
+        transcript = mol_e2e.PARSERS[harness.name](transcript_path.read_text(encoding="utf-8").splitlines())
+        stub_calls = [json.loads(line) for line in stub_log.read_text(encoding="utf-8").splitlines()] \
+            if stub_log.exists() else []
+        exec_stub_calls = [json.loads(line) for line in
+                           exec_stub_log.read_text(encoding="utf-8").splitlines()] \
+            if exec_stub_log.exists() else []
+        home_changes = home_snapshot.diff(snapshot_before, home_snapshot.take())
+        checkout_after = checkout_state()
+        checkout_changed = [f"{k}: {checkout_before.get(k)} -> {checkout_after.get(k)}"
+                            for k in sorted(set(checkout_before) | set(checkout_after))
+                            if checkout_before.get(k) != checkout_after.get(k)]
+        # A sibling's temporary root is normally already gone by the time this run
+        # starts -- runs are sequential -- but it is still named here so a model that
+        # goes looking for one (by guessing a path, not by finding a live directory)
+        # is caught the same way a read of the evidence directory itself is.
+        other_roots = [str(other) for other in run_roots if other != root]
+        context = mol_e2e.RunContext(harness=harness.name, mode=mode, fixture=fixture, repo=repo,
+                                     transcript=transcript, timed_out=timed_out, exit_code=exit_code,
+                                     home_changes=home_changes, checkout_changed=checkout_changed,
+                                     harness_stub_calls=stub_calls,
+                                     execution_stub_calls=exec_stub_calls,
+                                     expect_execution=mode == "auto", work=root, root=root,
+                                     grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
+                                                   "mol_e2e", "expectations/greeting", "reference_contract",
+                                                   "summary.json", "report.json", "home-snapshot", str(evidence),
+                                                   *[str(evidence / other) for other in os.listdir(evidence)
+                                                     if other != run_id],
+                                                   *other_roots])
+        verdicts = mol_e2e.evaluate(context)
+        verdicts.append(mol_e2e.verdict("no-processes-left", not left, f"reaped {len(reaped)}; left {left}"))
+        if transcript.models:
+            # The harness recorded which provider/model answered: it must be the campaign's one model.
+            verdicts.append(mol_e2e.verdict("model-pinned", set(transcript.models) == {harness.model.id},
+                                            f"answered by {sorted(transcript.models)}; configured {harness.model.id}"))
+        contract = mol_e2e.locate_contract(repo, transcript)
+        summary["contract"] = str(contract) if contract else None
+        summary["launchers"] = [str(p) for p in mol_e2e.locate_launchers(repo)]
+        if contract:
+            summary["deterministic_facts"] = mol_e2e.deterministic_facts(
+                json.loads(contract.read_text(encoding="utf-8")), repo)
+        summary["tool_calls"] = [{"tool": c.tool, "via": c.via, "kind": c.kind, "error": c.is_error,
+                                  "text": c.text[:400]} for c in transcript.calls]
+        summary["stop_reason"] = transcript.stop_reason
+        summary["error_message"] = transcript.error_message
+        summary["verdicts"] = verdicts
+        summary["status"] = mol_e2e.summarize(verdicts)
+        redaction = redact(root, prepared.secrets)
+        summary["redaction"] = redaction
+        if redaction["remaining"]:
+            summary["verdicts"].append(mol_e2e.verdict("evidence-redacted", False, str(redaction)))
+            summary["status"] = "fail"
+        if summary["status"] == "fail":
+            infra = infra_reason(transcript, (root / "stderr.log").read_text(encoding="utf-8", errors="replace"),
+                                 (root / harness.stdout_name).read_text(encoding="utf-8", errors="replace")
+                                 if harness.stdout_name != "transcript.jsonl" else "")
+            if infra:
+                summary["status"], summary["infra_reason"] = "infra", infra
+        (root / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    finally:
+        # The process group is gone well before this point (the inner finally above
+        # already reaped it); only now does anything from this run reach the
+        # evidence directory, moved byte-for-byte -- see archive()'s docstring for why
+        # nothing here is rewritten.
+        if root.is_dir():
+            archive(root, dest, keep=keep)
     return summary
 
 
@@ -1079,39 +1135,67 @@ def print_report(report: dict, color: bool) -> None:
 def reevaluate(evidence: Path) -> int:
     """Recompute verdicts from a saved transcript and repository. Facts that only the live
     run could observe (timeout, exit status, reaped processes, home and checkout snapshots,
-    stub calls) are carried over from the original summary, never recomputed."""
+    stub calls) are carried over from the original summary, never recomputed.
+
+    Grading always happens at the path the model worked in. validate_contract.py hashes
+    sources under the contract's own recorded repository.root, so an in-memory path
+    translation cannot reach it: when summary.json names a "root" other than the run's
+    evidence directory, a copy of the evidence is materialised there first (never the
+    other way around -- the evidence itself is never touched) and removed again once
+    this run's verdicts are in. Old evidence, with no "root", already was its own root."""
     carried = ("real-homes-unchanged", "checkout-unchanged", "no-processes-left", "evidence-redacted",
                "model-pinned")
     runs = []
     for summary_path in sorted(evidence.glob("*/summary.json")):
         old = json.loads(summary_path.read_text(encoding="utf-8"))
         run = summary_path.parent
-        transcript = mol_e2e.PARSERS[old["harness"]]((run / "transcript.jsonl").read_text(encoding="utf-8").splitlines())
-        stub_log = run / "harness-stub-specstride.jsonl"
-        stub_calls = [json.loads(line) for line in stub_log.read_text(encoding="utf-8").splitlines()] \
-            if stub_log.exists() else []
-        exec_log = run / "harness-exec-stub-specstride.jsonl"
-        exec_calls = [json.loads(line) for line in exec_log.read_text(encoding="utf-8").splitlines()] \
-            if exec_log.exists() else []
-        context = mol_e2e.RunContext(harness=old["harness"], mode=old["mode"], fixture=old["fixture"], repo=run / "repo",
-                                     transcript=transcript, timed_out=old["timed_out"], exit_code=old["exit_code"],
-                                     harness_stub_calls=stub_calls, execution_stub_calls=exec_calls,
-                                     expect_execution=old["mode"] == "auto", work=run,
-                                     grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
-                                                   "mol_e2e", "expectations/greeting", "reference_contract",
-                                                   "summary.json", "report.json", "home-snapshot",
-                                                   *[str(evidence / o) for o in os.listdir(evidence) if o != run.name]])
-        verdicts = mol_e2e.evaluate(context) + [v for v in old["verdicts"] if v["name"] in carried]
-        changed = {v["name"]: v["status"] for v in verdicts} != {v["name"]: v["status"] for v in old["verdicts"]}
-        new = {**old, "verdicts": verdicts, "status": mol_e2e.summarize(verdicts), "reevaluated": True,
-               "original_status": old["status"],
-               "changed_verdicts": sorted({v["name"] for v in verdicts} ^ {v["name"] for v in old["verdicts"]} |
-                                          {v["name"] for v in verdicts for w in old["verdicts"]
-                                           if v["name"] == w["name"] and v["status"] != w["status"]}) if changed else []}
-        (run / "summary-reevaluated.json").write_text(json.dumps(new, indent=2, default=str), encoding="utf-8")
-        runs.append(new)
-        failed = [v["name"] for v in verdicts if v["status"] == "fail"]
-        print(f"{new['run']:<34} {old['status']:>4} -> {new['status']:<4} changed={new['changed_verdicts']} failed={failed}")
+        root = Path(old["root"]) if old.get("root") else run
+        materialized = False
+        if root != run:
+            if root.exists():
+                marker = root / "summary.json"
+                same_run = marker.is_file() and json.loads(marker.read_text(encoding="utf-8")).get("run") == old.get("run")
+                if not same_run:
+                    reason = f"{root} already exists and is not this run's own materialised copy"
+                    runs.append({**old, "status": "skip", "reason": reason, "reevaluated": True})
+                    print(f"{old.get('run', run.name):<34} skip: {reason}")
+                    continue
+                # left there deliberately (e.g. --keep-run-roots on the original live run):
+                # grade it in place, but it is not ours to remove afterwards.
+            else:
+                shutil.copytree(run, root, symlinks=True)
+                materialized = True
+        try:
+            transcript = mol_e2e.PARSERS[old["harness"]]((root / "transcript.jsonl").read_text(encoding="utf-8").splitlines())
+            stub_log = root / "harness-stub-specstride.jsonl"
+            stub_calls = [json.loads(line) for line in stub_log.read_text(encoding="utf-8").splitlines()] \
+                if stub_log.exists() else []
+            exec_log = root / "harness-exec-stub-specstride.jsonl"
+            exec_calls = [json.loads(line) for line in exec_log.read_text(encoding="utf-8").splitlines()] \
+                if exec_log.exists() else []
+            context = mol_e2e.RunContext(harness=old["harness"], mode=old["mode"], fixture=old["fixture"],
+                                         repo=root / "repo", transcript=transcript, timed_out=old["timed_out"],
+                                         exit_code=old["exit_code"], harness_stub_calls=stub_calls,
+                                         execution_stub_calls=exec_calls, expect_execution=old["mode"] == "auto",
+                                         work=root, root=root,
+                                         grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
+                                                       "mol_e2e", "expectations/greeting", "reference_contract",
+                                                       "summary.json", "report.json", "home-snapshot", str(evidence),
+                                                       *[str(evidence / o) for o in os.listdir(evidence) if o != run.name]])
+            verdicts = mol_e2e.evaluate(context) + [v for v in old["verdicts"] if v["name"] in carried]
+            changed = {v["name"]: v["status"] for v in verdicts} != {v["name"]: v["status"] for v in old["verdicts"]}
+            new = {**old, "verdicts": verdicts, "status": mol_e2e.summarize(verdicts), "reevaluated": True,
+                   "original_status": old["status"],
+                   "changed_verdicts": sorted({v["name"] for v in verdicts} ^ {v["name"] for v in old["verdicts"]} |
+                                              {v["name"] for v in verdicts for w in old["verdicts"]
+                                               if v["name"] == w["name"] and v["status"] != w["status"]}) if changed else []}
+            (run / "summary-reevaluated.json").write_text(json.dumps(new, indent=2, default=str), encoding="utf-8")
+            runs.append(new)
+            failed = [v["name"] for v in verdicts if v["status"] == "fail"]
+            print(f"{new['run']:<34} {old['status']:>4} -> {new['status']:<4} changed={new['changed_verdicts']} failed={failed}")
+        finally:
+            if materialized:
+                shutil.rmtree(root, ignore_errors=True)
     return 1 if any(r["status"] == "fail" for r in runs) else 0
 
 
@@ -1138,6 +1222,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="skip the one-completion route probe before each harness (not recommended)")
     parser.add_argument("--evidence-dir", help="default: a new temporary directory (never inside the repository)")
     parser.add_argument("--skip-tiers", action="store_true", help="do not run Tiers 1 and 2 first")
+    parser.add_argument("--keep-run-roots", action="store_true",
+                        help="copy (instead of move) each run's temporary root into the evidence "
+                             "directory and leave the root in place afterwards, for debugging")
     parser.add_argument("--reevaluate", metavar="EVIDENCE_DIR",
                         help="re-score saved runs with the current assertions (no model call); "
                              "writes summary-reevaluated.json next to each summary.json")
@@ -1172,6 +1259,7 @@ def main(argv: list[str] | None = None) -> int:
     snapshot = home_snapshot.take() if live else None
     if snapshot is not None:
         home_snapshot.write(snapshot, evidence / "home-snapshot-before.json")
+    run_roots: list[Path] = []
 
     def probe(harness: Harness) -> str | None:
         """The route's own answer, recorded; None when it answered."""
@@ -1213,7 +1301,8 @@ def main(argv: list[str] | None = None) -> int:
                                   f"attempt {attempt}) ...",
                                   file=sys.stderr, flush=True)
                             try:
-                                result = {**run_one(harness, mode, fixture, evidence, timeout, snapshot),
+                                result = {**run_one(harness, mode, fixture, evidence, timeout, snapshot,
+                                                     run_roots, keep=args.keep_run_roots),
                                           "attempt": attempt, "budget": {"seconds": timeout, "source": budget_source}}
                             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                                 result = {**base, "status": "fail", "reason": f"runner error: {exc}",
