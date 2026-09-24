@@ -36,6 +36,11 @@ Classify each obligation on separate axes:
 | Kind | `implementation`, `prerequisite`, `verification`, `decision`, `operation` |
 | Timing | `pipeline-start`, `before:<stage>`, `after:<stage>`, `release` |
 | Producer | `existing`, `stage:<id>`, `automated-policy`, `external-authority`, `unknown` |
+
+An unchecked task is work still to do: its producer is the `stage:<id>` that implements it,
+not `existing`, even when files it names are already present. The bootstrap's
+`unclassified` producer is a placeholder: strict validation refuses it, and a
+`stage:<id>` producer must name a stage.
 | Disposition | `mapped`, `optional`, `out-of-scope`, `unresolved`, `unsupported` |
 
 Every entry needs a stable ID, source path and line/anchor, rationale, enforcing stage or
@@ -83,8 +88,10 @@ evidence paths, and bounded recovery. Put a prerequisite at the earliest boundar
 is both needed and expected to exist. Setup stages run only with `--implement`; otherwise
 their postconditions must already hold.
 
-Build a Specstride action using only options supported by the target installation. Current
-local support includes `--spec-format speckit-tasks`, `--feature`, `--proposer`, `--critic`,
+Build a Specstride action from these options only; this list is the supported set, so
+do not run `specstride --help`, look it up on `PATH`, or read its files to learn more
+(SKILL.md: whether it is installed is the launcher's `--dry-run` job to report):
+`--spec-format speckit-tasks`, `--feature`, `--proposer`, `--critic`,
 `--verification required`, `--verification-commands`, `--test-plan`, `--generate-tests`,
 `--telemetry`, `--loki-url`, `--otel`, `--otel-url`, `--live`, `--no-live`, and timeout/
 budget controls. `specstride resume` restores saved configuration, but persist explicit

@@ -144,6 +144,44 @@ class FixtureTests(unittest.TestCase):
         exclusive = mol_e2e.run_script("validate_contract.py", "--promote", "--allow-draft", contract, cwd=repo)
         self.assertEqual(exclusive.returncode, 2)
 
+    def test_strict_validation_names_three_quiet_derivation_mistakes(self) -> None:
+        """From the 2026-09-23 campaign: a preflight check filed under postconditions (the
+        runtime never runs it before the pipeline), the bootstrap's `unclassified` producer
+        left in place, and a present prerequisite no stage checks (a warning only)."""
+        base = self.workspace()
+        repo, draft = self.bootstrap(base, "greeting-ready")
+        contract = repo / "launch-contract.json"
+        reference = mol_e2e.reference_contract(draft, "greeting-ready")
+
+        def validate(change) -> subprocess.CompletedProcess[str]:
+            value = json.loads(json.dumps(reference))
+            change(value)
+            contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+            return mol_e2e.run_script("validate_contract.py", contract, cwd=repo)
+
+        clean = validate(lambda value: None)
+        self.assertEqual((clean.returncode, clean.stderr), (0, ""))
+        moved = validate(lambda value: value["stages"][0]["postconditions"].append(
+            {"type": "file_exists", "path": "approvals/release-approval.json", "timing": "preflight"}))
+        self.assertEqual(moved.returncode, 20)
+        self.assertIn("timing preflight applies to preconditions only", moved.stderr)
+        placeholder = validate(lambda value: value["coverage"][0].update(producer="unclassified"))
+        self.assertEqual(placeholder.returncode, 20)
+        self.assertIn("producer is still the bootstrap's `unclassified`", placeholder.stderr)
+        self.assertEqual(validate(lambda value: value["coverage"][0].update(producer="release-manager")).returncode, 0,
+                         "a producer in the model's own words is its call")
+        unknown_stage = validate(lambda value: value["coverage"][0].update(producer="stage:nowhere"))
+        self.assertEqual(unknown_stage.returncode, 20)
+        self.assertIn("producer stage:nowhere names no stage", unknown_stage.stderr)
+
+        def unchecked(value: dict) -> None:
+            for stage in value["stages"]:
+                stage["preconditions"] = [c for c in stage["preconditions"] if c["type"] != "file_exists"]
+        warned = validate(unchecked)
+        self.assertEqual(warned.returncode, 0, warned.stderr)
+        self.assertIn("PRE-001 names `approvals/release-approval.json`, which exists, but no stage precondition",
+                      warned.stderr)
+
     def test_reference_completion_has_exactly_one_correct_outcome(self) -> None:
         for fixture in mol_e2e.FIXTURE_NAMES:
             with self.subTest(fixture=fixture):

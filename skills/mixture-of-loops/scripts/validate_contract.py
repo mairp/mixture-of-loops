@@ -58,6 +58,23 @@ def derivation_hints(contract: dict) -> list[str]:
     return hints
 
 
+def unchecked_prerequisites(contract: dict) -> list[str]:
+    """Inventoried prerequisites that exist but that no stage precondition checks.
+
+    A present file passes today; the contract is what keeps a later run honest if it goes
+    away. Warned, not refused: whether an item gates the run is the model's call (SKILL.md
+    step 6, references/derivation.md "Stage and configuration rules").
+    """
+    checked = {str(check.get("path", "")).lstrip("./")
+               for stage in contract.get("stages", []) if isinstance(stage, dict)
+               for check in stage.get("preconditions", []) if isinstance(check, dict)}
+    return [f"{entry.get('id') or 'a prerequisite'} names `{entry.get('path')}`, which exists, but no stage "
+            f"precondition checks it: put a file_exists precondition at the earliest stage that needs it"
+            for entry in (contract.get("inventory") or {}).get("prerequisites", [])
+            if isinstance(entry, dict) and entry.get("present") is True
+            and str(entry.get("path", "")).lstrip("./") not in checked]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("contract")
@@ -93,7 +110,7 @@ def main() -> int:
         for hint in derivation_hints(original):
             print(f"next: {hint}", file=sys.stderr)
         return 20
-    for warning in warnings:
+    for warning in [*warnings, *unchecked_prerequisites(contract)]:
         print(f"warning: {warning}", file=sys.stderr)
     if args.promote and original.get("status") != "validated":
         write_status(path, original, "validated")

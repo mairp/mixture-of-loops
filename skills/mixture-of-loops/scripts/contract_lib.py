@@ -38,6 +38,10 @@ CHECKS = {
     "json_field_equals",
 }
 DISPOSITIONS = {"mapped", "optional", "out-of-scope", "unresolved", "unsupported"}
+# The bootstrap's producer placeholder: like an unresolved disposition, only a draft keeps it.
+# Other producers stay the model's words (references/derivation.md's Producer axis), except
+# that a `stage:<id>` must name a stage.
+UNCLASSIFIED_PRODUCER = "unclassified"
 # The optional harness-side `configuration.auto` budget: how often a supervising harness
 # may relaunch the launcher after a classified transient stage failure, and the wall clock
 # that supervision may span. Both are bounded by what the stages themselves declare, so a
@@ -190,6 +194,7 @@ def _validate_check(
     *,
     cwd: Path | None = None,
     roots: list[Path] | None = None,
+    postcondition: bool = False,
 ) -> None:
     _require(isinstance(check, dict), f"{label} must be an object", errors)
     if not isinstance(check, dict):
@@ -215,6 +220,11 @@ def _validate_check(
         _require("value" in check, f"{label}.value is required", errors)
     _require(check.get("timing", "stage") in {"preflight", "stage"},
              f"{label}.timing must be preflight or stage", errors)
+    # Preflight reads preconditions only: a postcondition marked preflight would never be
+    # checked before the run, so a gate written that way silently gates nothing.
+    _require(not (postcondition and check.get("timing") == "preflight"),
+             f"{label}.timing preflight applies to preconditions only; move this check to "
+             "preconditions to gate the run on it", errors)
 
 
 def check_source_hashes(contract: dict) -> list[str]:
@@ -641,6 +651,7 @@ def validate_contract(
                             errors,
                             cwd=stage_cwd,
                             roots=roots,
+                            postcondition=field == "postconditions",
                         )
             _require(bool(stage.get("postconditions")),
                      f"{label}.postconditions must support resume revalidation", errors)
@@ -717,6 +728,13 @@ def validate_contract(
             if not allow_draft:
                 _require(entry.get("disposition") not in {"unresolved", "unsupported"},
                          f"{label} remains {entry.get('disposition')}", errors)
+                producer = entry.get("producer")
+                _require(producer != UNCLASSIFIED_PRODUCER,
+                         f"{label}.producer is still the bootstrap's `unclassified`: name what produces it "
+                         "(stage:<id> for a pending task)", errors)
+                if isinstance(producer, str) and producer.startswith("stage:"):
+                    _require(producer[len("stage:"):] in stage_ids,
+                             f"{label}.producer {producer} names no stage", errors)
             source = entry.get("source")
             _require(isinstance(source, dict) and isinstance(source.get("path"), str)
                      and isinstance(source.get("line"), int) and source.get("line", 0) > 0
