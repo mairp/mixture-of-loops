@@ -171,7 +171,8 @@ PROMPTS = {
 # A run that is asked to execute gets the pipeline-acting stub instead of the refusing
 # one, in sleep mode so an intermediate running state is there to be observed.
 EXECUTION_STUB_ENV = {"MOL_EXEC_STUB_MODE": "sleep", "MOL_EXEC_STUB_SLEEP": "5",
-                      "MOL_EXEC_STUB_FEATURE": "001-greeting"}
+                      "MOL_EXEC_STUB_FEATURE": "001-greeting",
+                      "MOL_EXEC_STUB_IMPLEMENTATION": str(mol_e2e.IMPLEMENTATION)}
 # ── the budget ────────────────────────────────────────────────────────────────
 # Wall-clock seconds per run, by harness, model class (local, gpt-5 or Compass) and run kind:
 # `auto` does strictly more than deriving (it also runs the pipeline and supervises it

@@ -106,6 +106,7 @@ class ExecutionCase(unittest.TestCase):
         os.environ["MOL_EXEC_STUB_MODE"] = mode
         os.environ["MOL_EXEC_STUB_LOG"] = str(self.stub_log)
         os.environ["MOL_EXEC_STUB_FEATURE"] = FEATURE
+        os.environ["MOL_EXEC_STUB_IMPLEMENTATION"] = str(mol_e2e.IMPLEMENTATION)
         os.environ["NO_COLOR"] = "1"
         os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
         for key, value in settings.items():

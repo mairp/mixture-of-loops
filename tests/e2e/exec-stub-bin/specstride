@@ -12,6 +12,10 @@ the way MOL_EXEC_STUB_MODE tells it to.
     MOL_EXEC_STUB_REASON     fail: the run_stop.reason to record (postcondition_failed)
     MOL_EXEC_STUB_SLEEP      sleep: seconds to stay running before succeeding (30)
     MOL_EXEC_STUB_FEATURE    the feature slug under .specstride/features/ (001-greeting)
+    MOL_EXEC_STUB_IMPLEMENTATION  a directory whose files a successful run copies into
+                             its working directory, as a real run would implement the tasks
+                             (tests/fixtures/implementations/<fixture>); files already
+                             there are left alone
     MOL_EXEC_STUB_LOG        a JSONL file each invocation is appended to
 
 `transient` fails with exit 4 and records run_stop.reason=wall_budget, which is what a
@@ -22,6 +26,7 @@ launcher's own retries and a supervisor relaunch.
 
 import json
 import os
+import shutil
 import signal
 import sys
 import time
@@ -58,7 +63,19 @@ def record(reason: str) -> None:
                                  "feature": feature, "attempt": attempt}) + "\n")
 
 
+def implement() -> None:
+    source = os.environ.get("MOL_EXEC_STUB_IMPLEMENTATION")
+    if not source or not Path(source).is_dir():
+        return
+    for path in sorted(Path(source).rglob("*")):
+        target = Path(path.relative_to(source))
+        if path.is_file() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+
+
 def succeed() -> None:
+    implement()
     (state / "PROGRESS.md").write_text(
         f"# {feature}\n\nAll phases complete on attempt {attempt}.\n", encoding="utf-8")
     print(f"stub specstride: {feature} complete (attempt {attempt})")

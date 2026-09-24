@@ -24,6 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "skills" / "mixture-of-loops"
 SCRIPTS = SKILL / "scripts"
 FIXTURES = ROOT / "tests" / "fixtures"
+# What implementing the greeting tasks produces. The fixtures leave it out, so T001/T002
+# are genuinely pending; the execution stub copies it in, as a real specstride run would.
+IMPLEMENTATION = FIXTURES / "implementations" / "greeting"
 STUB_BIN = Path(__file__).resolve().parent / "stub-bin"
 EXEC_STUB_BIN = Path(__file__).resolve().parent / "exec-stub-bin"
 NAME = "mixture-of-loops"
