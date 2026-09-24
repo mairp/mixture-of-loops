@@ -614,6 +614,8 @@ def validate_contract(
         _require(isinstance(stages, list) and bool(stages), "validated contract needs stages", errors)
     stage_ids: set[str] = set()
     ordered_ids: list[str] = []
+    stage_kinds = ({stage.get("id"): stage.get("kind") for stage in stages if isinstance(stage, dict)}
+                   if isinstance(stages, list) else {})
     if isinstance(stages, list):
         for index, stage in enumerate(stages):
             label = f"stages[{index}]"
@@ -735,6 +737,13 @@ def validate_contract(
                 if isinstance(producer, str) and producer.startswith("stage:"):
                     _require(producer[len("stage:"):] in stage_ids,
                              f"{label}.producer {producer} names no stage", errors)
+                # Implementing a task is Specstride's loop: a setup or command stage that
+                # writes the code itself (2026-09-23 gpt-5 grid) is the model doing the work.
+                if entry.get("kind") == "implementation" and entry.get("disposition") == "mapped":
+                    _require(any(stage_kinds.get(stage_id) in ("specstride", LEGACY_KIND)
+                                 for stage_id in entry.get("stage_ids") or [] if isinstance(stage_id, str)),
+                             f"{label} is an implementation obligation mapped to no specstride stage: "
+                             "implementation is Specstride's job, never a setup or command stage's", errors)
             source = entry.get("source")
             _require(isinstance(source, dict) and isinstance(source.get("path"), str)
                      and isinstance(source.get("line"), int) and source.get("line", 0) > 0

@@ -38,7 +38,7 @@ def coverage_entry(source: str, stage_ids: list[str], identifier: str = "OBL-1")
     return {
         "id": identifier,
         "source": {"path": source, "line": 1, "anchor": "T001"},
-        "kind": "implementation",
+        "kind": "operation",  # a command-stage obligation: implementation needs a specstride stage
         "timing": "pipeline-start",
         "producer": f"stage:{stage_ids[0]}",
         "disposition": "mapped",

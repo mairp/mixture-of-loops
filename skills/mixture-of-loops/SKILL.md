@@ -146,6 +146,13 @@ an existing root-level launcher, which keeps working unchanged.
 7. Make stage order explicit and serial unless actual interfaces and shared-state rules
    prove concurrency safe. Use argv arrays and environment references, never shell
    strings, `eval`, `sh -c`, or blanket answers to prompts.
+
+   An implementation obligation (every task the bootstrap inventoried starts as one) maps
+   to a `specstride` stage: implementing it is Specstride's loop, not yours. Never write
+   the implementation yourself, neither into the repository nor into a stage's argv
+   (`python3 -c "open('src/x.py','w').write(...)"`): `setup` stages are for declared,
+   idempotent environment setup and `command` stages for declared verification. Strict
+   validation refuses a mapped implementation obligation with no `specstride` stage.
 8. Validate, then render. Same rule as step 3 — a shell command line, not a subprocess call:
 
    ```text

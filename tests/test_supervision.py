@@ -51,7 +51,7 @@ def contract_for(repository: Path, stages: list[dict], *, root: Path | None = No
         "authorized_roots": [str(path) for path in (authorized or [repository])],
         "sources": [{"path": relative, "kind": "spec", "sha256": digest(source), "lines": 1}],
         "coverage": [{"id": "OBL-1", "source": {"path": relative, "line": 1, "anchor": "T001"},
-                      "kind": "implementation", "timing": "pipeline-start",
+                      "kind": "operation", "timing": "pipeline-start",
                       "producer": f"stage:{stages[0]['id']}", "disposition": "mapped",
                       "stage_ids": [stage["id"] for stage in stages], "verification_ids": [],
                       "rationale": "fixture obligation", "evidence": ["done"]}],

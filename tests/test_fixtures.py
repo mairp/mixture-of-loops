@@ -174,6 +174,13 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(unknown_stage.returncode, 20)
         self.assertIn("producer stage:nowhere names no stage", unknown_stage.stderr)
 
+        def hand_implemented(value: dict) -> None:   # 2026-09-23 gpt-5: the model wrote the code into a stage
+            value["stages"][0].update(kind="setup", action={"argv": ["python3", "-c", "open('src/greet.py','w')"],
+                                                            "timeout_seconds": 60})
+        self_implemented = validate(hand_implemented)
+        self.assertEqual(self_implemented.returncode, 20)
+        self.assertIn("implementation obligation mapped to no specstride stage", self_implemented.stderr)
+
         def unchecked(value: dict) -> None:
             for stage in value["stages"]:
                 stage["preconditions"] = [c for c in stage["preconditions"] if c["type"] != "file_exists"]
