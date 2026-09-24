@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import sys
 
 RELATIVE_ROOTS = (".pi", ".prime", ".agents", ".dsh", ".claude/skills")
@@ -68,11 +69,18 @@ def take(home: Path | None = None) -> dict[str, str]:
     return dict(sorted(snapshot.items()))
 
 
+# dsh keeps one session directory per project, named after its working directory
+# (/root/foo -> --root-foo--). A live run works in a temporary root, so its sessions
+# could only ever land under a --tmp-… name; any other project's session is the
+# host's own dsh use going on meanwhile (2026-09-24: /root/agentic-netops-srl).
+OTHER_PROJECT_SESSION = re.compile(r"/\.dsh/sessions/--(?!tmp-)[^/]*--(/|$)")
+
+
 def diff(before: dict[str, str], after: dict[str, str]) -> list[str]:
     changes = []
     for path in sorted(set(before) | set(after)):
         old, new = before.get(path), after.get(path)
-        if old == new:
+        if old == new or OTHER_PROJECT_SESSION.search(path):
             continue
         if old is None:
             changes.append(f"added    {path} ({new})")

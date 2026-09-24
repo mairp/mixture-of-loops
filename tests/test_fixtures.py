@@ -181,6 +181,14 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(self_implemented.returncode, 20)
         self.assertIn("implementation obligation mapped to no specstride stage", self_implemented.stderr)
 
+        def unwritten_plan(value: dict) -> None:   # 2026-09-24 gpt-5 pi-implicit
+            value["stages"][0]["action"]["argv"] += ["--verification-commands", "verification-commands.json"]
+        missing_plan = validate(unwritten_plan)
+        self.assertEqual(missing_plan.returncode, 20)
+        self.assertIn("--verification-commands verification-commands.json, which does not exist or is empty", missing_plan.stderr)
+        (repo / "verification-commands.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(validate(unwritten_plan).returncode, 0)
+
         def unchecked(value: dict) -> None:
             for stage in value["stages"]:
                 stage["preconditions"] = [c for c in stage["preconditions"] if c["type"] != "file_exists"]

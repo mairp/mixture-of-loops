@@ -142,6 +142,15 @@ def _is_learning_state(path: Path) -> bool:
     return False
 
 
+def _option_values(action: object, option: str) -> list[str]:
+    """Every value an argv gives `option`, as `option VALUE` or `option=VALUE`."""
+    argv = action.get("argv") if isinstance(action, dict) else None
+    if not isinstance(argv, list):
+        return []
+    values = [argv[i + 1] for i, item in enumerate(argv[:-1]) if item == option and isinstance(argv[i + 1], str)]
+    return values + [item.split("=", 1)[1] for item in argv if isinstance(item, str) and item.startswith(option + "=")]
+
+
 def _validate_action(action: object, label: str, errors: list[str]) -> None:
     _require(isinstance(action, dict), f"{label} must be an object", errors)
     if not isinstance(action, dict):
@@ -640,6 +649,15 @@ def validate_contract(
                          f"{label}.cwd escapes authorized_roots", errors)
             stage_cwd = resolve_path(cwd, root) if isinstance(cwd, str) else root
             _validate_action(stage.get("action"), f"{label}.action", errors)
+            if not allow_draft:
+                # SKILL.md step 5: the verification plan is a file the derivation writes; a
+                # stage that names one it never wrote validates and dry-runs, then fails live.
+                # specstride resolves a relative one from where it is launched: the stage cwd.
+                for plan in _option_values(stage.get("action"), "--verification-commands"):
+                    path = resolve_path(plan, stage_cwd)
+                    _require(path.is_file() and path.stat().st_size > 0,
+                             f"{label}.action passes --verification-commands {plan}, which does not exist or is "
+                             f"empty at {path}: write it (SKILL.md step 5) or drop the option", errors)
             if "resume" in stage:
                 _validate_action(stage.get("resume"), f"{label}.resume", errors)
             for field in ("preconditions", "postconditions"):

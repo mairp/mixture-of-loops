@@ -879,6 +879,17 @@ class E2ELogicTests(unittest.TestCase):
         self.assertIn("1 result(s) carried the MOL_VIA=shell reminder", detail)
         self.assertIn("['bash']", detail)
 
+    def test_the_hosts_own_dsh_sessions_are_not_a_run_touching_the_real_home(self) -> None:
+        sys.path.insert(0, str(Path(mol_e2e.__file__).parent))
+        import home_snapshot
+        before = {"/root/.dsh/settings.yaml": "file:1"}
+        after = {**before, "/root/.dsh/sessions/--root-agentic-netops-srl--": "dir",
+                 "/root/.dsh/sessions/--root-agentic-netops-srl--/s/session.jsonl.zstd": "file:2",
+                 "/root/.dsh/sessions/--tmp-mol-e2e-run-ab12-repo--": "dir"}
+        self.assertEqual(home_snapshot.diff(before, after),
+                         ["added    /root/.dsh/sessions/--tmp-mol-e2e-run-ab12-repo-- (dir)"])
+        self.assertEqual(len(home_snapshot.diff(before, {"/root/.dsh/settings.yaml": "file:9"})), 1)
+
     def test_codex_gets_catalog_metadata_for_gpt_models_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "models_cache.json"
