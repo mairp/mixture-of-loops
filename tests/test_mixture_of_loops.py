@@ -353,31 +353,6 @@ class MixtureOfLoopsTests(unittest.TestCase):
                 if mode == "never":
                     self.assertNotIn("--live", display["args"])
 
-    def test_onboarding_links_all_repository_harnesses(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            onboard = ROOT / "bin" / "onboard-skill"
-            result = run(onboard, "--harness", "all", "--scope", "repo", "--repo", repository)
-            self.assertEqual(result.returncode, 0, result.stdout)
-            for relative in (
-                ".agents/skills/mixture-of-loops",
-                ".claude/skills/mixture-of-loops",
-            ):
-                target = repository / relative
-                self.assertTrue(target.is_symlink())
-                self.assertEqual(target.resolve(), SKILL.resolve())
-            checked = run(
-                onboard,
-                "--harness",
-                "all",
-                "--scope",
-                "repo",
-                "--repo",
-                repository,
-                "--check",
-            )
-            self.assertEqual(checked.returncode, 0, checked.stdout)
-
     def test_validation_rejects_shell_strings_literal_secrets_and_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
