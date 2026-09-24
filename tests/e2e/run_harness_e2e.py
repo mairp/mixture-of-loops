@@ -289,9 +289,14 @@ def archive(root: Path, dest: Path, *, keep: bool = False) -> None:
 
 
 def base_environment(home: Path, tmp: Path, token: str) -> dict[str, str]:
-    """A clean environment: no inherited keys, tokens, or harness configuration."""
+    """A clean environment: no inherited keys, tokens, or harness configuration.
+
+    Also puts the stub back in front of PATH for login shells: codex runs every command
+    through `bash -lc`, and /etc/profile resets PATH, so without the run home's own
+    .bash_profile the launcher's `command -v specstride` found no specstride at all."""
     keep = {key: os.environ[key] for key in ("LANG", "LC_ALL", "USER", "LOGNAME", "SHELL") if key in os.environ}
     stub = home.parent / "stub-bin"
+    (home / ".bash_profile").write_text(f'PATH="{stub}:$PATH"\nexport PATH\n', encoding="utf-8")
     return {**keep, "PATH": f"{stub}:{os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
             "HOME": str(home), "TMPDIR": str(tmp), "TERM": "dumb", "NO_COLOR": "1",
             "PYTHONDONTWRITEBYTECODE": "1", "MOL_E2E_RUN": token}
@@ -702,8 +707,13 @@ class Codex(Harness):
         codex_home.mkdir()
         binding = provider_binding(self.models_json, "litellm", self.model.id)
         key = resolve_key_reference(binding.get("apiKey", "")) or ""
+        catalog = codex_model_catalog(self.model.id)
+        if catalog is not None:
+            (codex_home / "model-catalog.json").write_text(json.dumps(catalog, indent=2), encoding="utf-8")
         (codex_home / "config.toml").write_text(
-            f'model = "{self.model.id}"\nmodel_provider = "mol-litellm"\n\n[model_providers.mol-litellm]\n'
+            f'model = "{self.model.id}"\nmodel_provider = "mol-litellm"\n'
+            + (f'model_catalog_json = "{codex_home / "model-catalog.json"}"\n' if catalog is not None else "")
+            + '\n[model_providers.mol-litellm]\n'
             f'name = "LiteLLM"\nbase_url = "{LITELLM}/v1"\nenv_key = "MOL_LITELLM_KEY"\n'
             'wire_api = "responses"\n', encoding="utf-8")
         environment = {**base_environment(home, tmp, token), "CODEX_HOME": str(codex_home), "MOL_LITELLM_KEY": key}
@@ -711,6 +721,38 @@ class Codex(Harness):
                 "-m", self.model.id, prompt]
         return Prepared(argv, environment, f"codex -> LiteLLM responses -> {self.model.id}", [key] if key else [],
                         onboard("codex", repo, environment))
+
+
+CODEX_MODELS_CACHE = Path("/root/.codex/models_cache.json")
+
+
+def codex_model_catalog(model_id: str, cache: Path = CODEX_MODELS_CACHE) -> dict | None:
+    """A model_catalog_json for Codex that knows `model_id`, or None to leave Codex alone.
+
+    Codex ships metadata only for the models its own backend lists. Without an entry,
+    `codex exec -m gpt-5` warns "Model metadata for `gpt-5` not found. Defaulting to
+    fallback metadata" and offers a shell tool gpt-5 was not trained on: in the
+    2026-09-23 grid it wrapped every command in a second `bash -lc` and leaked
+    exec_command's `max_output_tokens` into the command text, and 20-40% of its calls
+    failed on the quoting. The entry comes from the host's own Codex models cache: the
+    model itself if listed, else the shortest-named model of the same family (gpt-5.5 for
+    gpt-5), renamed. LiteLLM's gpt-5 route rejects the `tool_search` tool, so the search
+    tool is off. Only gpt-* models get one: the local-model runs never had the warning
+    turned into failures, and their recorded budgets assume Codex as it was.
+    """
+    if not model_id.startswith("gpt-"):
+        return None
+    try:
+        models = json.loads(cache.read_text(encoding="utf-8"))["models"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    exact = [m for m in models if isinstance(m, dict) and m.get("slug") == model_id]
+    family = sorted((m for m in models if isinstance(m, dict) and str(m.get("slug", "")).startswith(model_id + ".")),
+                    key=lambda m: (len(m["slug"]), m["slug"]))
+    if not exact and not family:
+        return None
+    entry = dict((exact or family)[0], slug=model_id, display_name=model_id, supports_search_tool=False)
+    return {"models": [entry]}
 
 
 DSH_HOME_REAL = Path("/root/.dsh")
@@ -984,7 +1026,7 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
                                      expect_execution=mode == "auto", work=root, root=root,
                                      grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
                                                    "mol_e2e", "expectations/greeting", "reference_contract",
-                                                   "summary.json", "report.json", "home-snapshot", str(evidence),
+                                                   "summary.json", "report.json", "home-snapshot", "stub-bin/", "stub-specstride.jsonl", str(evidence),
                                                    *[str(evidence / other) for other in os.listdir(evidence)
                                                      if other != run_id],
                                                    *other_roots])
@@ -1230,7 +1272,7 @@ def reevaluate(evidence: Path) -> int:
                                          work=root, root=worked,
                                          grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
                                                        "mol_e2e", "expectations/greeting", "reference_contract",
-                                                       "summary.json", "report.json", "home-snapshot",
+                                                       "summary.json", "report.json", "home-snapshot", "stub-bin/", "stub-specstride.jsonl",
                                                        # before #26 a run worked inside the evidence
                                                        # directory, so every call named it
                                                        *([] if evidence.resolve() in worked.resolve().parents
