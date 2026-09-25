@@ -495,6 +495,16 @@ class ConcurrencyTests(ExecutionCase):
                                          start_new_session=True, check=False)
                 self.assertEqual(planned.returncode, 0, planned.stdout + planned.stderr)
                 self.assertIn("[DRY-RUN]", planned.stdout)
+                # the preflight a live run would apply, answered here (SKILL.md step 9)
+                self.assertIn("[PREFLIGHT] implement-feature: command available: specstride: pass", planned.stdout)
+                self.assertRegex(planned.stdout, r"\[PREFLIGHT\] implement-feature: file exists: \S+"
+                                                 r"approvals/release-approval.json: pass")
+        bare = {**environment, "PATH": "/usr/bin:/bin"}
+        missing = subprocess.run([str(self.launcher), "--dry-run"], cwd=self.launcher.parent, env=bare,
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
+                                 start_new_session=True, check=False)
+        self.assertEqual(missing.returncode, 0, "dry-run reports a failing preflight; the live run blocks on it")
+        self.assertIn("[PREFLIGHT] implement-feature: command available: specstride: fail", missing.stdout)
         after = mol_e2e.tree_state(self.repo)
         self.assertEqual(sorted(set(after) - set(before)), [])
         self.assertEqual(sorted(p for p in set(after) & set(before) if after[p] != before[p]), [])

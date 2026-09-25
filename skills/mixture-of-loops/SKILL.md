@@ -196,8 +196,12 @@ an existing root-level launcher, which keeps working unchanged.
    ```
 
    Dry-run is read-only and takes precedence over `--implement` and `--smoke` in every
-   argument order. Run further stubbed checks when the generated setup, decision, or
-   recovery logic warrants them. In `generate` this is where the work ends; say so, and
+   argument order. Its `[PREFLIGHT]` lines say whether each preflight check holds on this
+   host, `command available: specstride` included: that is the answer to whether
+   Specstride is installed, so report it from there and never probe for it yourself. A
+   `fail` there is not a generation failure; the live run blocks on it (exit 21). Run
+   further stubbed checks when the generated setup, decision, or recovery logic warrants
+   them: running the launcher against stubbed stage commands, never inspecting the host. In `generate` this is where the work ends; say so, and
    offer `run`. In `auto` the generated artifacts are complete at this point: go straight
    to step 11 with the path you just rendered. Do not revisit steps 1-8, and do not
    re-check the ignore rule, the contract or the launcher again — the gate in step 11
