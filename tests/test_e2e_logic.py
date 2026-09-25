@@ -837,16 +837,17 @@ class E2ELogicTests(unittest.TestCase):
         check("pi", ["pi", "-p", "--model", "litellm/gpt-5", "x"], {}, gpt5)
         check("prime", ["prime", "gpt5", "-p", "x"], {}, gpt5)
         check("codex", ["codex", "exec", "-m", "gpt-5", "x"], {}, gpt5)
-        with tempfile.TemporaryDirectory() as tmp:
-            import yaml
-            settings = {**DSH_SETTINGS, "llm-pi-ai": {"providers": {
-                **DSH_SETTINGS["llm-pi-ai"]["providers"],
-                "compass-gpt5-high": {"apiKeyEnv": "LITELLM_MASTER_KEY", "api": "openai-completions",
-                                      "baseURL": "http://127.0.0.1:4000/v1", "models": [{"id": "gpt-5"}],
-                                      "compat": {"maxTokensField": "max_completion_tokens"}}}}}
-            Path(tmp, "settings.yaml").write_text(yaml.safe_dump(run_harness_e2e.dsh_settings(
-                settings, gpt5.dsh, gpt5.id)), encoding="utf-8")
-            check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, gpt5)
+        if importlib.util.find_spec("yaml") is not None:   # dsh only; not standard library
+            with tempfile.TemporaryDirectory() as tmp:
+                import yaml
+                settings = {**DSH_SETTINGS, "llm-pi-ai": {"providers": {
+                    **DSH_SETTINGS["llm-pi-ai"]["providers"],
+                    "compass-gpt5-high": {"apiKeyEnv": "LITELLM_MASTER_KEY", "api": "openai-completions",
+                                          "baseURL": "http://127.0.0.1:4000/v1", "models": [{"id": "gpt-5"}],
+                                          "compat": {"maxTokensField": "max_completion_tokens"}}}}}
+                Path(tmp, "settings.yaml").write_text(yaml.safe_dump(run_harness_e2e.dsh_settings(
+                    settings, gpt5.dsh, gpt5.id)), encoding="utf-8")
+                check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, gpt5)
         claude_env = {"ANTHROPIC_BASE_URL": run_harness_e2e.SHIM,
                       **{v: gpt5.id for v in run_harness_e2e.CLAUDE_MODEL_VARIABLES}}
         for harness, argv, environment in (
