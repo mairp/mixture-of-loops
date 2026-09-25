@@ -708,6 +708,11 @@ class E2ELogicTests(unittest.TestCase):
         self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "pass")
         context.transcript = mol_e2e.parse_claude_stream(lines[1:])
         self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "fail")
+        context.transcript = mol_e2e.Transcript(calls=[mol_e2e.ToolCall(
+            id="c1", tool="ipython", args={}, kind="shell", via="%%bash",
+            text="sed -n '1,200p' .prime/agent/skills/mixture-of-loops/SKILL.md")], agent_end=True, stop_reason="stop")
+        self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "pass",
+                         "prime reads SKILL.md through a %%bash cell")
 
     # ── the 2026-09-23 hardening, observed live (#22) ─────────────────────────
 

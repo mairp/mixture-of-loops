@@ -686,7 +686,10 @@ def evaluate(context: RunContext) -> list[dict]:
     # SKILL.md itself, or a resource only the skill points to (references/, assets/): harnesses that do
     # not echo the expanded skill (Claude Code stream-json, codex --json) still show the model using it.
     resource = re.compile(rf"{NAME}/(SKILL\.md|references/|assets/)")
-    read = [c.text for c in transcript.calls if (c.kind == "read" or c.via == "python" or c.tool == "command_execution")
+    # a shell call counts too: prime reads SKILL.md with `sed -n` in a %%bash cell (2026-09-25
+    # gpt-5 prime-implicit, blocked fixture)
+    read = [c.text for c in transcript.calls
+            if (c.kind in ("read", "shell") or c.via == "python" or c.tool == "command_execution")
             and resource.search(c.text)]
     invoked = [name for name in transcript.skill_invoked if name.lstrip("/$").startswith(NAME)]
     loaded = expanded or bool(read) or bool(invoked)
