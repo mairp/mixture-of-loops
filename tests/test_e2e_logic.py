@@ -889,6 +889,10 @@ class E2ELogicTests(unittest.TestCase):
         self.assertEqual(home_snapshot.diff(before, after),
                          ["added    /root/.dsh/sessions/--tmp-mol-e2e-run-ab12-repo-- (dir)"])
         self.assertEqual(len(home_snapshot.diff(before, {"/root/.dsh/settings.yaml": "file:9"})), 1)
+        synced = "/root/.claude/skills/synced/abc_def"
+        self.assertEqual(home_snapshot.diff(before, {**before, synced: "dir", synced + "/manifest.json": "file:3"}),
+                         [], "the host's own Claude Code skill sync")
+        self.assertEqual(len(home_snapshot.diff(before, {**before, "/root/.claude/skills/mixture-of-loops": "dir"})), 1)
 
     def test_codex_gets_catalog_metadata_for_gpt_models_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

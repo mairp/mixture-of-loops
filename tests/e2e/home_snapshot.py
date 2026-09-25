@@ -74,13 +74,17 @@ def take(home: Path | None = None) -> dict[str, str]:
 # could only ever land under a --tmp-… name; any other project's session is the
 # host's own dsh use going on meanwhile (2026-09-24: /root/agentic-netops-srl).
 OTHER_PROJECT_SESSION = re.compile(r"/\.dsh/sessions/--(?!tmp-)[^/]*--(/|$)")
+# Claude Code's account skill sync cache. A live run's Claude Code has a temporary HOME,
+# so only the host's own Claude Code sessions write the real one (2026-09-25: the
+# supervising session's sync rounds failed gpt-5 pi-auto, which never touches ~/.claude).
+HOST_SKILL_SYNC = re.compile(r"/\.claude/skills/synced(/|$)")
 
 
 def diff(before: dict[str, str], after: dict[str, str]) -> list[str]:
     changes = []
     for path in sorted(set(before) | set(after)):
         old, new = before.get(path), after.get(path)
-        if old == new or OTHER_PROJECT_SESSION.search(path):
+        if old == new or OTHER_PROJECT_SESSION.search(path) or HOST_SKILL_SYNC.search(path):
             continue
         if old is None:
             changes.append(f"added    {path} ({new})")
