@@ -250,7 +250,8 @@ or tool name.
     This gates, starts the launcher detached, and reports until the run is terminal. A
     harness with a scheduling primitive may instead run `launch` once and `observe` at each
     wake-up; the messages are identical either way, and `observe` prints the delay to wait
-    before the next one. To end a run the user asked to end, use `stop --launcher
+    before the next one. The launcher runs detached, so a shell tool that kills a
+    long-running command (a per-call timeout) stops only the reporting, never the run. To end a run the user asked to end, use `stop --launcher
     RUN_SCRIPT`, or the `kill -TERM -<pgid>` the launch message prints.
 
 13. Relay the `[MOL-*]` lines as they are printed, and add nothing to them. Report the
@@ -259,7 +260,17 @@ or tool name.
     Every one of those lines is also appended to `runs/<id>/harness-report.log`. If the
     harness moves a long-running supervision command to the background, truncates its
     output, or loses the stream some other way, read that file and relay the lines from
-    there rather than describing the run in your own words.
+    there rather than describing the run in your own words. If the command was cut short
+    (a tool timeout, a signal) before a `[MOL-DIGEST]` line, nothing has reported the end
+    of the run yet: run
+
+    ```text
+    python3 SKILL_ROOT/scripts/supervise.py observe --launcher RUN_SCRIPT
+    ```
+
+    and repeat it, waiting the delay it prints, until it prints the `[MOL-DIGEST]` line.
+    Each call returns at once. Never read `state.json` or the launcher's logs and report
+    the outcome yourself: the digest is the report.
 
 ### Launch discipline
 
