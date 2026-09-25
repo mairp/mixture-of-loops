@@ -9,6 +9,7 @@ blocked-outcome variants.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -274,23 +275,26 @@ class E2ELogicTests(unittest.TestCase):
         check("prime", ["prime", "compass", "-p", "x"], {}, compass)
         check("codex", ["codex", "exec", "-m", qwen.id, "x"], {}, qwen)
         check("claude", ["claude", "-p", "--model", qwen.id, "x"], claude_env, qwen)
-        with tempfile.TemporaryDirectory() as tmp:
-            import yaml
-            Path(tmp, "settings.yaml").write_text(yaml.safe_dump(run_harness_e2e.dsh_settings(
-                DSH_SETTINGS, "local-high", qwen.id)), encoding="utf-8")
-            check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, qwen)
-            rejected_dsh = [
-                (["dsh", "--profile", "headless", "x"], {"DSH_HOME": "/root/.dsh"}),          # the real home
-                (["dsh", "--profile", "headless", "--patch", "p.yml", "x"], {"DSH_HOME": tmp}),  # a patch loses to settings
-                (["dsh", "--profile", "web", "x"], {"DSH_HOME": tmp}),
-                (["dsh", "--profile", "headless", "x"], {}),
-            ]
-            for argv, environment in rejected_dsh:
-                with self.subTest(argv=argv, environment=environment):
-                    with self.assertRaises(RuntimeError):
-                        check("dsh", argv, environment, qwen)
-            with self.assertRaises(RuntimeError):      # settings bound to another model than the campaign's
-                check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, compass)
+        # PyYAML is not standard library, and the hermetic suite runs without it (CI);
+        # only the dsh adapter reads YAML, so its checks run where PyYAML is installed.
+        if importlib.util.find_spec("yaml") is not None:
+            with tempfile.TemporaryDirectory() as tmp:
+                import yaml
+                Path(tmp, "settings.yaml").write_text(yaml.safe_dump(run_harness_e2e.dsh_settings(
+                    DSH_SETTINGS, "local-high", qwen.id)), encoding="utf-8")
+                check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, qwen)
+                rejected_dsh = [
+                    (["dsh", "--profile", "headless", "x"], {"DSH_HOME": "/root/.dsh"}),          # the real home
+                    (["dsh", "--profile", "headless", "--patch", "p.yml", "x"], {"DSH_HOME": tmp}),  # a patch loses to settings
+                    (["dsh", "--profile", "web", "x"], {"DSH_HOME": tmp}),
+                    (["dsh", "--profile", "headless", "x"], {}),
+                ]
+                for argv, environment in rejected_dsh:
+                    with self.subTest(argv=argv, environment=environment):
+                        with self.assertRaises(RuntimeError):
+                            check("dsh", argv, environment, qwen)
+                with self.assertRaises(RuntimeError):      # settings bound to another model than the campaign's
+                    check("dsh", ["dsh", "--profile", "headless", "x"], {"DSH_HOME": tmp}, compass)
         rejected = [
             ("pi", ["pi", "-p", "--model", "litellm/gpt-5", "x"], {}, qwen),
             ("pi", ["pi", "-p", "--model", "litellm/qwen3.8-27b-q5", "x"], {}, compass),
