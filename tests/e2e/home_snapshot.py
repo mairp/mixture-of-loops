@@ -71,9 +71,10 @@ def take(home: Path | None = None) -> dict[str, str]:
 
 # dsh keeps one session directory per project, named after its working directory
 # (/root/foo -> --root-foo--). A live run works in a temporary root, so its sessions
-# could only ever land under a --tmp-… name; any other project's session is the
-# host's own dsh use going on meanwhile (2026-09-24: /root/agentic-netops-srl).
-OTHER_PROJECT_SESSION = re.compile(r"/\.dsh/sessions/--(?!tmp-)[^/]*--(/|$)")
+# could only ever land under a --tmp-mol-e2e-run-… name (mkdtemp's prefix); any other
+# project's session is the host's own dsh use going on meanwhile (2026-09-24:
+# /root/agentic-netops-srl; 2026-09-25: another Claude Code session's /tmp scratchpad).
+OTHER_PROJECT_SESSION = re.compile(r"/\.dsh/sessions/--(?!tmp-mol-e2e-run-)[^/]*--(/|$)")
 # Claude Code's account skill sync cache. A live run's Claude Code has a temporary HOME,
 # so only the host's own Claude Code sessions write the real one (2026-09-25: the
 # supervising session's sync rounds failed gpt-5 pi-auto, which never touches ~/.claude).

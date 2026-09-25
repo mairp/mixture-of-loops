@@ -895,6 +895,7 @@ class E2ELogicTests(unittest.TestCase):
         before = {"/root/.dsh/settings.yaml": "file:1"}
         after = {**before, "/root/.dsh/sessions/--root-agentic-netops-srl--": "dir",
                  "/root/.dsh/sessions/--root-agentic-netops-srl--/s/session.jsonl.zstd": "file:2",
+                 "/root/.dsh/sessions/--tmp-claude-0--root-phoenix-scratchpad--": "dir",
                  "/root/.dsh/sessions/--tmp-mol-e2e-run-ab12-repo--": "dir"}
         self.assertEqual(home_snapshot.diff(before, after),
                          ["added    /root/.dsh/sessions/--tmp-mol-e2e-run-ab12-repo-- (dir)"])
