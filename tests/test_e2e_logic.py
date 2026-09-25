@@ -384,8 +384,8 @@ class E2ELogicTests(unittest.TestCase):
         self.assertEqual((run_harness_e2e.claude_max_output(qwen), run_harness_e2e.claude_max_output(compass)),
                          ("8192", "32000"))
         bebop = Path("/root/gpu_rtx_3090/bebop.sh")
-        if not bebop.is_file():
-            self.skipTest("bebop.sh is not on this host")
+        if not os.access(bebop, os.R_OK):   # CI runs as a user who cannot even stat /root
+            self.skipTest("bebop.sh is not readable on this host")
         # the launcher's own function, not a copy of its numbers (thinking is off in every campaign)
         for model in (qwen, compass):
             result = subprocess.run(["bash", "-c", 'eval "$(sed -n "/^_bebop_max_output() {/,/^}/p" "$1")"; '
