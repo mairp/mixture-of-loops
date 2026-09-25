@@ -103,21 +103,28 @@ an existing root-level launcher, which keeps working unchanged.
 1. Read [references/derivation.md](references/derivation.md). Inventory all supplied
    feature artifacts and relevant repository instructions before deriving stages.
 2. Before writing any artifact, make a Git repository ignore `.mixture-of-loops/`, so the
-   first `git status` after generation stays clean. Append the rule once, idempotently,
+   first `git status` after generation shows the contract and its verification plan and
+   nothing else. Append the rule once, idempotently,
    and say which file received it. Use the repository's `.gitignore` by default and
    `.git/info/exclude` when the user prefers to leave shared files untouched. Read and
    write only those two files: never the global excludes file or any git config outside
    the repository, even to check whether a rule already exists there:
 
    ```text
-   .mixture-of-loops/*
-   !.mixture-of-loops/*/
+   .mixture-of-loops/**
+   !.mixture-of-loops/**/
    !.mixture-of-loops/**/launch-contract.json
+   !.mixture-of-loops/**/verification-commands.json
+   .mixture-of-loops/**/generated/
+   .mixture-of-loops/**/runs/
    ```
 
-   These negations keep the contract committable, since Git does not descend into a
-   wholly ignored directory. Offer plain `.mixture-of-loops/` when the user wants the
-   contract ignored too.
+   The negations keep the contract and the verification plan committable, since Git does
+   not descend into a wholly ignored directory; the last two lines keep the renderer's
+   bundles (which carry a copy of the contract) and run state ignored at any depth. Offer
+   plain `.mixture-of-loops/` when the user wants the contract ignored too. The launcher,
+   its `generated/` bundle and `runs/` are ignored, not litter: never delete or move them
+   to tidy `git status`, because the launcher runs from its bundle.
 3. Bootstrap a provenance-bound draft, with the learning mode read above. This is a shell
    command line, not a call to make through a language's process API (see above):
 
@@ -136,7 +143,9 @@ an existing root-level launcher, which keeps working unchanged.
 5. Preserve declared verification commands as fixed `executable` plus `args`; never
    invent a plausible command. An absent or conflicting declaration is an explicit
    finding. Keep Specstride's verification plan separate from the launch contract and pass it
-   with `--verification-commands`. Its shape is fixed (references/contract.md, "Verification
+   with `--verification-commands`. Write it beside the contract, as
+   `.mixture-of-loops/<feature>/verification-commands.json`, never under `generated/` or
+   `runs/`, which the renderer and the runtime own. Its shape is fixed (references/contract.md, "Verification
    plan"): an object with a `commands` array whose entries carry `id`, `phase`,
    `executable`, `args`, an absolute `cwd` and `timeoutSec`.
 6. Classify prerequisites by producer and earliest valid check. A future stage output is
