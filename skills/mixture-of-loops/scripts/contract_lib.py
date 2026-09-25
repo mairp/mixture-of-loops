@@ -186,6 +186,49 @@ def _unchecked_prerequisites(contract: dict, root: Path) -> list[str]:
     return problems
 
 
+def verification_plan_problems(path: Path) -> list[str]:
+    """What Specstride's load_declared_commands would refuse in a --verification-commands
+    document, short of resolving executables on PATH: an object whose non-empty `commands`
+    holds entries with a unique `id`, a positive `phase`, `executable`, string `args`, an
+    absolute existing `cwd` and a positive `timeoutSec`. A bare list with `cwd: "."`
+    validated and dry-ran, then stops a live launch (2026-09-25 gpt-5 pi-auto)."""
+    shape = ('write {"commands": [{"id", "phase", "executable", "args", "cwd", "timeoutSec"}]} '
+             "(references/contract.md, Verification plan)")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"is not JSON ({exc}): {shape}"]
+    if not isinstance(document, dict) or not isinstance(document.get("commands"), list) \
+            or not document["commands"]:
+        return [f"is not an object with a non-empty `commands` array: {shape}"]
+    problems, seen = [], set()
+    for index, entry in enumerate(document["commands"]):
+        where = f"commands[{index}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} must be an object")
+            continue
+        identifier = entry.get("id")
+        if not isinstance(identifier, str) or not identifier.strip():
+            problems.append(f"{where}.id must be a non-empty string")
+        elif identifier in seen:
+            problems.append(f"{where}.id {identifier!r} is a duplicate")
+        else:
+            seen.add(identifier)
+        for key in ("phase", "timeoutSec"):
+            value = entry.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                problems.append(f"{where}.{key} must be a positive integer")
+        if not isinstance(entry.get("executable"), str) or not entry["executable"]:
+            problems.append(f"{where}.executable must be a non-empty string")
+        args = entry.get("args", [])
+        if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+            problems.append(f"{where}.args must be a list of strings")
+        cwd = entry.get("cwd")
+        if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
+            problems.append(f"{where}.cwd must be an absolute path to an existing directory")
+    return problems
+
+
 def _option_values(action: object, option: str) -> list[str]:
     """Every value an argv gives `option`, as `option VALUE` or `option=VALUE`."""
     argv = action.get("argv") if isinstance(action, dict) else None
@@ -714,9 +757,13 @@ def validate_contract(
                 # specstride resolves a relative one from where it is launched: the stage cwd.
                 for plan in _option_values(stage.get("action"), "--verification-commands"):
                     path = resolve_path(plan, stage_cwd)
-                    _require(path.is_file() and path.stat().st_size > 0,
+                    exists = path.is_file() and path.stat().st_size > 0
+                    _require(exists,
                              f"{label}.action passes --verification-commands {plan}, which does not exist or is "
                              f"empty at {path}: write it (SKILL.md step 5) or drop the option", errors)
+                    if exists:
+                        errors.extend(f"{label}.action --verification-commands {plan}: {problem}"
+                                      for problem in verification_plan_problems(path))
             if "resume" in stage:
                 _validate_action(stage.get("resume"), f"{label}.resume", errors)
             for field in ("preconditions", "postconditions"):

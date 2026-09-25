@@ -37,6 +37,29 @@ The launch contract is pipeline data. It does not replace Specstride's verificat
 The renderer accepts only `validated` contracts with current source hashes and no open
 blockers. `bootstrap_contract.py` intentionally creates a draft with unresolved coverage.
 
+## Verification plan
+
+The file a `specstride` stage passes with `--verification-commands` is Specstride's own
+input, separate from the contract. It is a JSON object, never a bare list:
+
+```json
+{
+  "schema_version": "1.0",
+  "feature": "007-example",
+  "commands": [
+    {"id": "unit-tests", "phase": 2, "executable": "python3",
+     "args": ["-m", "unittest", "discover", "-s", "tests", "-v"],
+     "cwd": "/absolute/repository/root", "timeoutSec": 600}
+  ]
+}
+```
+
+Every entry needs a unique `id`, the tasks.md `phase` whose gate runs it (a positive
+integer), `executable` and `args` exactly as declared, an absolute existing `cwd`, and a
+positive `timeoutSec`; `env` is optional. A relative plan path resolves from the stage `cwd`.
+Strict validation refuses a plan that is missing, empty or not in this shape, because
+Specstride would refuse it only once the launch is live.
+
 ## Stages
 
 Stage `kind` is one of `setup`, `decision`, `command`, `specstride`, or `smoke`.

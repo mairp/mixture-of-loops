@@ -188,6 +188,18 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(missing_plan.returncode, 20)
         self.assertIn("--verification-commands verification-commands.json, which does not exist or is empty", missing_plan.stderr)
         (repo / "verification-commands.json").write_text("{}", encoding="utf-8")
+        not_an_object = validate(unwritten_plan)   # 2026-09-25 gpt-5 pi-auto: a bare list, cwd "."
+        self.assertEqual(not_an_object.returncode, 20)
+        self.assertIn("is not an object with a non-empty `commands` array", not_an_object.stderr)
+        entry = {"id": "unit-tests", "executable": "python3", "args": ["-m", "unittest"], "cwd": "."}
+        (repo / "verification-commands.json").write_text(json.dumps({"commands": [entry]}), encoding="utf-8")
+        partial = validate(unwritten_plan)
+        self.assertEqual(partial.returncode, 20)
+        for missing in ("phase must be a positive integer", "timeoutSec must be a positive integer",
+                        "cwd must be an absolute path"):
+            self.assertIn(missing, partial.stderr)
+        entry.update(phase=2, timeoutSec=600, cwd=str(repo))
+        (repo / "verification-commands.json").write_text(json.dumps({"commands": [entry]}), encoding="utf-8")
         self.assertEqual(validate(unwritten_plan).returncode, 0)
 
         def unchecked(value: dict) -> None:   # 2026-09-24 gpt-5 codex-auto, prime-auto promoted past the warning

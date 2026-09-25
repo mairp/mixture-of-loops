@@ -76,8 +76,8 @@ declared gate.
 The installed Specstride interface checked on 2026-09-09 accepts a JSON document containing
 `commands[]` with `id`, `phase`, `executable`, `args`, `cwd`, `timeoutSec`, and optional
 `env`. It resolves bare executables, rejects missing cwd or unknown phases, and binds the
-document hash into its verification plan. Recheck `specstride run --help` when targeting a
-different installation. This evidence came from the local Specstride checkout (then still named Wiggum) at revision
+document hash into its verification plan. references/contract.md ("Verification plan")
+gives the exact shape, and strict validation refuses a plan that does not have it. This evidence came from the local Specstride checkout (then still named Wiggum) at revision
 `1e3777f3fe16d0bc6d9e0568b4b59e519e4bab9f` with verification-related working-tree
 changes, so it establishes local compatibility rather than a released-version guarantee.
 

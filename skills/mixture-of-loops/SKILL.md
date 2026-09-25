@@ -136,7 +136,9 @@ an existing root-level launcher, which keeps working unchanged.
 5. Preserve declared verification commands as fixed `executable` plus `args`; never
    invent a plausible command. An absent or conflicting declaration is an explicit
    finding. Keep Specstride's verification plan separate from the launch contract and pass it
-   with `--verification-commands`.
+   with `--verification-commands`. Its shape is fixed (references/contract.md, "Verification
+   plan"): an object with a `commands` array whose entries carry `id`, `phase`,
+   `executable`, `args`, an absolute `cwd` and `timeoutSec`.
 6. Classify prerequisites by producer and earliest valid check. A future stage output is
    not a preflight input. Existing authorization may be consumed within its scope;
    missing non-delegable authority blocks before the affected model run. Never fabricate
