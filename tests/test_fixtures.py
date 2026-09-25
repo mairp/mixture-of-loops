@@ -228,6 +228,17 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(validate(lambda value: value["stages"][0]["postconditions"].append(
             {"type": "dir_exists", "path": ".specstride/features/001-greeting"})).returncode, 0)
 
+        def invented_reason(value: dict) -> None:   # 2026-09-25 qwen went looking for these in specstride's source
+            value["stages"][0]["recovery"] = {"max_attempts": 2, "retry_exit_codes": [4], "backoff_seconds": [5],
+                                              "reason": {"jsonl": ".specstride/features/001-greeting/events.jsonl",
+                                                         "event": "run_stop", "field": "reason",
+                                                         "allowed": ["budget_exceeded"]}}
+        invented = validate(invented_reason)
+        self.assertEqual(invented.returncode, 20)
+        self.assertIn("'budget_exceeded', which Specstride never stops a retryable run with", invented.stderr)
+        self.assertEqual(validate(lambda value: (invented_reason(value), value["stages"][0]["recovery"]["reason"]
+                                                 .update(allowed=["wall_budget"]))).returncode, 0)
+
         def hand_written(value: dict) -> None:   # 2026-09-24 gpt-5 prime-auto skipped the bootstrap
             value.pop("generated_by")
             value.pop("inventory")

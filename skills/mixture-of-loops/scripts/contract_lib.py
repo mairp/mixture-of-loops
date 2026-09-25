@@ -74,6 +74,13 @@ SHELL_MARKER_ENV = "MOL_VIA"
 SHELL_MARKER_VALUE = "shell"
 
 
+# The run_stop.reason values Specstride writes with exit 4 that a relaunch can help
+# (/root/specstride orchestrator.sh, checked 2026-09-25; references/derivation.md has the
+# full exit-4 table). A model left to find them searched the host for Specstride's source
+# (2026-09-25 qwen claude-explicit); an invented one would never match a real stop.
+RETRYABLE_STOP_REASONS = ("wall_budget", "proposer_consecutive_errors")
+
+
 class ContractError(Exception):
     pass
 
@@ -820,6 +827,13 @@ def validate_contract(
                         _require(isinstance(reason.get("allowed"), list) and bool(reason.get("allowed"))
                                  and all(isinstance(item, str) for item in reason.get("allowed", [])),
                                  f"{label}.recovery.reason.allowed must be a nonempty string array", errors)
+                        if stage.get("kind") == CURRENT_KIND and isinstance(reason.get("allowed"), list):
+                            unknown = [item for item in reason["allowed"]
+                                       if isinstance(item, str) and item not in RETRYABLE_STOP_REASONS]
+                            _require(not unknown,
+                                     f"{label}.recovery.reason.allowed names {', '.join(map(repr, unknown))}, which "
+                                     f"Specstride never stops a retryable run with: use "
+                                     f"{' or '.join(RETRYABLE_STOP_REASONS)} (references/derivation.md)", errors)
                         if isinstance(reason.get("jsonl"), str) and roots:
                             _require(_inside(resolve_path(reason["jsonl"], stage_cwd), roots),
                                      f"{label}.recovery.reason.jsonl escapes authorized_roots", errors)

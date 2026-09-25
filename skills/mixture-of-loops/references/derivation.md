@@ -115,7 +115,21 @@ skill's *Learning mode*): `off` by default, `suggest` when the request asks the 
 reference).
 
 Specstride exit `4` covers wall budget, iteration exhaustion, and consecutive proposer errors.
-Only retry it when the newest correlated event records an allowed `run_stop.reason`. Exit
+Only retry it when the newest correlated event records an allowed `run_stop.reason`. These
+are the exact `run_stop.reason` values Specstride writes with exit `4` (its
+`orchestrator.sh`, checked 2026-09-25), so `recovery.reason.allowed` takes its words from
+this list and nowhere else; do not search the host for Specstride's source to find them:
+
+| `run_stop.reason` | Meaning | A relaunch can help |
+| --- | --- | --- |
+| `wall_budget` | the run's wall-clock budget ran out mid-phase | yes: resume continues the phase |
+| `proposer_consecutive_errors` | the proposer failed several passes in a row (provider errors) | yes, when the errors are transient |
+| `proposer_max_iter` | the phase used every proposer iteration | no: the same budget runs out again |
+| `proposer_no_progress` | passes stopped changing anything | no |
+| `proposer_yield_budget` | a pass yielded to a long job more often than allowed | no |
+| `proposer_cap_exhausted` | passes were killed at the pass ceiling repeatedly | no |
+
+Exit `4` with any other reason, or with no correlated `run_stop`, is not retryable. Exit
 `6` is an intentional stop and must remain stopped. Exit `5` means another run owns the
 workdir and is a terminal launcher conflict.
 
