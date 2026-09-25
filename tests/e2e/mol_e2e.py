@@ -768,8 +768,15 @@ def evaluate(context: RunContext) -> list[dict]:
                                    f"status={contract.get('status')}"))
         else:
             promoted = [c for c in promotes if PROMOTED in c.result]
-            results.append(verdict("status-owned-by-promote", bool(promoted),
-                                   f"{len(promotes)} --promote call(s), {len(promoted)} printed {PROMOTED!r}"))
+            # The stamp --promote writes beside `validated` is the file's own proof; Codex now
+            # and then returns a command's output without its stdout (2026-09-24 and -25
+            # codex-implicit: a stamped contract, an empty or echo-only promote result).
+            stamp = contract.get("promotion")
+            stamped = bool(promotes) and contract.get("status") == "validated" and isinstance(stamp, dict) \
+                and stamp.get("sha256") == _contract_lib().promotion_digest(contract)
+            results.append(verdict("status-owned-by-promote", bool(promoted) or stamped,
+                                   f"{len(promotes)} --promote call(s), {len(promoted)} printed {PROMOTED!r}; "
+                                   f"promotion stamp {'matches' if stamped else 'absent or stale'}"))
         # The bootstrap resolves each prerequisite path and records whether it exists; a
         # contract that kept the inventory must still say so (dropping it is allowed).
         inventory = contract.get("inventory")

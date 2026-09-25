@@ -748,6 +748,16 @@ class E2ELogicTests(unittest.TestCase):
         verdicts = self.evaluate("greeting-ready", happy_script("pi").end(), repo, base)
         self.assertEqual(verdicts["status-owned-by-promote"], "pass", self.last)
         confirmed = json.dumps(PROMOTED)[1:-1]    # as it sits inside a JSONL line
+        contract = repo / "launch-contract.json"
+        stamped = json.loads(contract.read_text(encoding="utf-8"))
+        silent = happy_script("pi")   # Codex returned the promote's result without its stdout
+        silent.lines = [line.replace(confirmed, "") for line in silent.lines]
+        self.assertEqual(self.evaluate("greeting-ready", silent.end(), repo, base)["status-owned-by-promote"], "pass",
+                         "the stamp on disk is --promote's own record")
+        unstamped = dict(stamped)
+        unstamped.pop("promotion")   # the status typed in by hand from here on
+        contract.write_text(json.dumps(unstamped, indent=2), encoding="utf-8")
+        self.assertEqual(self.evaluate("greeting-ready", silent.end(), repo, base)["status-owned-by-promote"], "fail")
         plain = happy_script("pi")
         plain.lines = [line.replace(" --promote", "").replace(confirmed, "valid validated launch contract: greeting")
                        for line in plain.lines]
