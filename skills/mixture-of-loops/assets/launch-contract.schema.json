@@ -20,6 +20,11 @@
     "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
     "status": {"enum": ["draft", "validated"]},
     "generated_by": {"type": "object"},
+    "promotion": {
+      "type": "object",
+      "required": ["sha256"],
+      "properties": {"by": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+    },
     "repository": {
       "type": "object",
       "additionalProperties": false,

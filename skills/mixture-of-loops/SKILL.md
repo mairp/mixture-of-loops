@@ -20,9 +20,14 @@ of the command, and a wrapper is where they get lost. In a notebook-style harnes
 means a shell cell (`%%bash`) or a `!` line, not `subprocess.run`.
 
 Work inside the repository and `SKILL_ROOT` only. Do not list or read parent directories,
-sibling directories or the wider filesystem, and do not search for `specstride` or other
-tooling: whether it is installed is the launcher's `--dry-run` job to report (step 9), not
-yours to discover.
+sibling directories, your home directory or the wider filesystem, and do not search for
+`specstride` or other tooling (`which`, `command -v`, `type`, a `PATH` directory's
+listing), run it (`specstride --help`), or read its executable: whether it is installed is
+the launcher's `--dry-run` job to report (step 9), and the options it takes are the ones
+[references/derivation.md](references/derivation.md) lists. `SKILL_ROOT` is the directory as
+you reached it; do not follow a symlink out of it to list what surrounds its target. Git
+configuration outside the repository (`~/.gitconfig`, `~/.config/git/`,
+`core.excludesFile`, `git config --global`) is out of scope too.
 
 ## Inputs and output
 
@@ -100,7 +105,9 @@ an existing root-level launcher, which keeps working unchanged.
 2. Before writing any artifact, make a Git repository ignore `.mixture-of-loops/`, so the
    first `git status` after generation stays clean. Append the rule once, idempotently,
    and say which file received it. Use the repository's `.gitignore` by default and
-   `.git/info/exclude` when the user prefers to leave shared files untouched:
+   `.git/info/exclude` when the user prefers to leave shared files untouched. Read and
+   write only those two files: never the global excludes file or any git config outside
+   the repository, even to check whether a rule already exists there:
 
    ```text
    .mixture-of-loops/*
@@ -142,7 +149,13 @@ an existing root-level launcher, which keeps working unchanged.
    an open `blocker` finding whose `source` is the prerequisite's own line, and it stops
    derivation at a draft: a runtime precondition check on the same path does not resolve
    it, because the authority must exist before the pipeline is derived, not before it
-   runs.
+   runs. A `present` one is consumed within its scope: give it a precondition on its path
+   at the earliest stage that needs it. Strict validation refuses a present prerequisite
+   no stage checks.
+
+   `file_exists` is for a file. For a directory, Specstride's feature state directory
+   `.specstride/features/<slug>` included, use `dir_exists`; validation refuses
+   `file_exists` on either.
 7. Make stage order explicit and serial unless actual interfaces and shared-state rules
    prove concurrency safe. Use argv arrays and environment references, never shell
    strings, `eval`, `sh -c`, or blanket answers to prompts.
@@ -161,8 +174,11 @@ an existing root-level launcher, which keeps working unchanged.
      --contract LAUNCH_CONTRACT --output RUN_SCRIPT
    ```
 
-   Never write `status` yourself: the bootstrap writes `draft`, and only `--promote`
-   writes `validated`, and only when the strict check passes. While any `blocker` finding
+   Never write `status` yourself, and never write a contract from scratch: derive from the
+   bootstrap's draft. The bootstrap writes `draft`, and only `--promote` writes `validated`,
+   and only when the strict check passes. It stamps what it validated, and the renderer
+   refuses `validated` without that stamp or after any later edit: promote after every
+   change, and render only after it exits 0. While any `blocker` finding
    is `open`, `--promote` exits 20, leaves (or sets) `draft`, and prints each blocker. A
    `next:` line names work the draft still owes (derivation not done, or an absent
    prerequisite with no blocker at its line): do it, then promote again. Without `next:`

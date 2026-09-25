@@ -1065,4 +1065,12 @@ def reference_contract(draft: dict, fixture: str) -> dict:
         })
     else:
         contract["status"] = "validated"
+        _contract_lib().stamp_promotion(contract)   # as --promote leaves it
     return contract
+
+
+def _contract_lib():
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    import contract_lib
+    return contract_lib

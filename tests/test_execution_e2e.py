@@ -57,6 +57,8 @@ def execution_contract(draft: dict, fixture: str) -> dict:
     contract["stages"][1]["action"]["timeout_seconds"] = 120
     for entry in contract["coverage"]:
         entry["evidence"] = [STATE]
+    if contract["status"] == "validated":
+        mol_e2e._contract_lib().stamp_promotion(contract)   # re-stamped after the changes, as --promote would
     return contract
 
 

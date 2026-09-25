@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ from contract_lib import (
     artifact_root,
     canonical_bytes,
     load_contract,
+    require_promoted,
     validate_contract,
     warn_if_not_shell_invoked,
 )
@@ -121,9 +123,11 @@ def main() -> int:
     warn_if_not_shell_invoked("render_launcher.py")
     try:
         contract = load_contract(args.contract)
+        as_written = json.loads(json.dumps(contract))   # the stamp covers the file, not the normalized copy
         # Normalizes legacy spellings in place, so the bundle carries the current ones.
         for warning in validate_contract(contract, allow_draft=False, check_sources=True):
             print(f"warning: {warning}", file=sys.stderr)
+        require_promoted(as_written)
         output = Path(args.output).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists() and not existing_launcher_is_intact(output) and not args.replace_edited:

@@ -47,6 +47,8 @@ def contract_for(repository: Path, stages: list[dict], *, root: Path | None = No
         "schema_version": "1.0",
         "id": "fixture-pipeline",
         "status": "validated",
+        "generated_by": {"tool": "tests/test_supervision.py"},
+        "inventory": {},
         "repository": {"root": str(root or repository), "revision": None, "dirty": None},
         "authorized_roots": [str(path) for path in (authorized or [repository])],
         "sources": [{"path": relative, "kind": "spec", "sha256": digest(source), "lines": 1}],
@@ -69,7 +71,9 @@ def instant_stage(cwd: str = ".") -> dict:
 
 def render(contract: dict, repository: Path, name: str = "run-fixture.sh") -> Path:
     path = repository / "launch-contract.json"
-    path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+    # as validate_contract.py --promote leaves it: render_launcher.py only renders that
+    path.write_text(json.dumps(contract_lib.stamp_promotion(json.loads(json.dumps(contract))), indent=2),
+                    encoding="utf-8")
     launcher = repository / name
     result = subprocess.run(
         [sys.executable, str(SCRIPTS / "render_launcher.py"), "--contract", str(path),

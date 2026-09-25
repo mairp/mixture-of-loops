@@ -218,7 +218,7 @@ class E2ELogicTests(unittest.TestCase):
         value = json.loads(contract.read_text(encoding="utf-8"))
         value["findings"] = [f for f in value["findings"] if f["id"] != "missing-release-approval"]
         value["status"] = "validated"
-        contract.write_text(json.dumps(value), encoding="utf-8")
+        contract.write_text(json.dumps(mol_e2e._contract_lib().stamp_promotion(value)), encoding="utf-8")
         self.assertEqual(mol_e2e.run_script("render_launcher.py", "--contract", contract, "--output",
                                             repo / "run.sh", cwd=repo).returncode, 0)
         (repo / "approvals").mkdir()

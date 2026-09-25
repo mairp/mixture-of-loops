@@ -85,7 +85,9 @@ changes, so it establishes local compatibility rather than a released-version gu
 
 Each stage declares dependencies, cwd, preconditions, one fixed-argv action, postconditions,
 evidence paths, and bounded recovery. Put a prerequisite at the earliest boundary where it
-is both needed and expected to exist. Setup stages run only with `--implement`; otherwise
+is both needed and expected to exist. Every `present` entry in `inventory.prerequisites`
+gets a precondition on its path (strict validation refuses one that has none), unless a
+`resolved` or `accepted` finding at its own line records why it gates nothing. Setup stages run only with `--implement`; otherwise
 their postconditions must already hold.
 
 Build a Specstride action from these options only; this list is the supported set, so

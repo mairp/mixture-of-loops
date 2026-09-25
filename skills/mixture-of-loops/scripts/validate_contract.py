@@ -5,7 +5,9 @@
 hand. It validates the contract as if it were `validated`; when that passes it writes
 `validated` into the file, and when it does not it writes `draft` back (undoing a
 hand-set `validated`), prints every blocker, and exits 20. A contract with an open
-blocker therefore always stays a draft.
+blocker therefore always stays a draft. `validated` is written with a `promotion` stamp
+over the rest of the contract, and render_launcher.py renders nothing without a matching
+one: a hand-typed status, or an edit after promotion, needs --promote again.
 """
 
 from __future__ import annotations
@@ -18,11 +20,16 @@ from pathlib import Path
 import sys
 import tempfile
 
-from contract_lib import ContractError, StaleSourceError, load_contract, validate_contract, warn_if_not_shell_invoked
+from contract_lib import (ContractError, StaleSourceError, load_contract, promotion_digest, stamp_promotion,
+                          validate_contract, warn_if_not_shell_invoked)
 
 
 def write_status(path: Path, contract: dict, status: str) -> None:
+    """Write `status`; `validated` carries the stamp render_launcher.py checks, `draft` drops it."""
     contract["status"] = status
+    contract.pop("promotion", None)
+    if status == "validated":
+        stamp_promotion(contract)
     text = json.dumps(contract, indent=2, ensure_ascii=False) + "\n"
     handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False)
     with handle:
@@ -56,23 +63,6 @@ def derivation_hints(contract: dict) -> list[str]:
                          f"({where[0]}:{where[1]}), and no open blocker has that source: if it is a "
                          "non-delegable authority, record it there (SKILL.md step 6)")
     return hints
-
-
-def unchecked_prerequisites(contract: dict) -> list[str]:
-    """Inventoried prerequisites that exist but that no stage precondition checks.
-
-    A present file passes today; the contract is what keeps a later run honest if it goes
-    away. Warned, not refused: whether an item gates the run is the model's call (SKILL.md
-    step 6, references/derivation.md "Stage and configuration rules").
-    """
-    checked = {str(check.get("path", "")).lstrip("./")
-               for stage in contract.get("stages", []) if isinstance(stage, dict)
-               for check in stage.get("preconditions", []) if isinstance(check, dict)}
-    return [f"{entry.get('id') or 'a prerequisite'} names `{entry.get('path')}`, which exists, but no stage "
-            f"precondition checks it: put a file_exists precondition at the earliest stage that needs it"
-            for entry in (contract.get("inventory") or {}).get("prerequisites", [])
-            if isinstance(entry, dict) and entry.get("present") is True
-            and str(entry.get("path", "")).lstrip("./") not in checked]
 
 
 def main() -> int:
@@ -110,9 +100,11 @@ def main() -> int:
         for hint in derivation_hints(original):
             print(f"next: {hint}", file=sys.stderr)
         return 20
-    for warning in [*warnings, *unchecked_prerequisites(contract)]:
+    for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
-    if args.promote and original.get("status") != "validated":
+    stamp = original.get("promotion")
+    stamped = isinstance(stamp, dict) and stamp.get("sha256") == promotion_digest(original)
+    if args.promote and not (original.get("status") == "validated" and stamped):
         write_status(path, original, "validated")
         print(f"promoted to validated: {contract.get('id')}")
     state = contract.get("status", "unknown")

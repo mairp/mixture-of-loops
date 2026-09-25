@@ -142,6 +142,50 @@ def _is_learning_state(path: Path) -> bool:
     return False
 
 
+def _is_feature_state_dir(path: Path) -> bool:
+    """True for Specstride's per-feature state directory, `<state dir>/features/<slug>`,
+    whether or not it exists yet: a stage's postcondition often names it before the run."""
+    parts = path.parts
+    return len(parts) >= 3 and parts[-3] in (STATE_DIRNAME, LEGACY_STATE_DIRNAME) and parts[-2] == "features"
+
+
+def _unchecked_prerequisites(contract: dict, root: Path) -> list[str]:
+    """Inventoried prerequisites that exist but that no stage precondition checks and no
+    settled finding at their own line explains.
+
+    A present file passes today; a precondition is what keeps a later run honest if it
+    goes away. This was a warning, and gpt-5 promoted past it twice (2026-09-24 codex-auto,
+    prime-auto): the release approval was consumed by no stage. A prerequisite that truly
+    gates nothing is recorded as a resolved or accepted finding at its own source line."""
+    checked: set[Path] = set()
+    for stage in contract.get("stages") or []:
+        if not isinstance(stage, dict):
+            continue
+        cwd = resolve_path(stage["cwd"], root) if isinstance(stage.get("cwd"), str) else root
+        for check in stage.get("preconditions") or []:
+            if isinstance(check, dict) and isinstance(check.get("path"), str):
+                checked.add(resolve_path(check["path"], cwd))
+    settled = {(source.get("path"), source.get("line"))
+               for finding in contract.get("findings") or []
+               if isinstance(finding, dict) and finding.get("status") in ("resolved", "accepted")
+               and isinstance(source := finding.get("source"), dict)}
+    problems = []
+    for entry in (contract.get("inventory") or {}).get("prerequisites") or []:
+        if not isinstance(entry, dict) or entry.get("present") is not True:
+            continue
+        written = entry.get("resolved") or entry.get("path")
+        if not isinstance(written, str) or resolve_path(written, root) in checked:
+            continue
+        source = entry.get("source") if isinstance(entry.get("source"), dict) else {}
+        if (source.get("path"), source.get("line")) in settled:
+            continue
+        problems.append(f"{entry.get('id') or 'a prerequisite'} names `{entry.get('path')}`, which exists, but no "
+                        "stage precondition checks it: put a file_exists precondition on it at the earliest stage "
+                        "that needs it (if it gates nothing, record why as an accepted finding at "
+                        f"{source.get('path')}:{source.get('line')})")
+    return problems
+
+
 def _option_values(action: object, option: str) -> list[str]:
     """Every value an argv gives `option`, as `option VALUE` or `option=VALUE`."""
     argv = action.get("argv") if isinstance(action, dict) else None
@@ -215,6 +259,13 @@ def _validate_check(
         if isinstance(check.get("path"), str) and cwd is not None and roots:
             _require(_inside(resolve_path(check["path"], cwd), roots),
                      f"{label}.path escapes authorized_roots", errors)
+    if kind == "file_exists" and isinstance(check.get("path"), str) and cwd is not None:
+        # runtime's file_exists is is_file(): on a directory it fails every run, after the
+        # stage did its work (2026-09-24 qwen claude-auto on .specstride/features/001-greeting)
+        target = resolve_path(check["path"], cwd)
+        _require(not (target.is_dir() or _is_feature_state_dir(target)),
+                 f"{label} is file_exists on `{check['path']}`, which is a directory: use dir_exists, "
+                 "or name a file inside it", errors)
     if kind in {"env_set", "command_available"}:
         _require(isinstance(check.get("name"), str), f"{label}.name is required", errors)
     if kind == "command_success":
@@ -568,6 +619,14 @@ def validate_contract(
     _require(status in {"draft", "validated"}, "status must be draft or validated", errors)
     if not allow_draft:
         _require(status == "validated", "contract status must be validated", errors)
+        # The bootstrap's provenance: sources, inventory and coverage come from reading the
+        # artifacts, not from the model's memory of them (2026-09-24 gpt-5 prime-auto wrote
+        # the whole contract by hand and skipped the bootstrap).
+        generated = contract.get("generated_by")
+        _require(isinstance(generated, dict) and isinstance(generated.get("tool"), str)
+                 and isinstance(contract.get("inventory"), dict),
+                 "the contract was not started by bootstrap_contract.py (no generated_by or inventory): "
+                 "bootstrap a draft (SKILL.md step 3) and derive from it, never write one by hand", errors)
 
     repository = contract.get("repository")
     _require(isinstance(repository, dict), "repository must be an object", errors)
@@ -811,6 +870,9 @@ def validate_contract(
             if not allow_draft and finding.get("severity") == "blocker" and finding.get("status") == "open":
                 errors.append(f"{label} is an open blocker: {finding.get('message', '')}")
 
+    if not allow_draft:
+        errors.extend(_unchecked_prerequisites(contract, root))
+
     if errors:
         raise ContractError("\n".join(errors))
     if check_sources:
@@ -827,3 +889,28 @@ def validate_contract(
 
 def canonical_bytes(contract: dict) -> bytes:
     return (json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+
+
+def promotion_digest(contract: dict) -> str:
+    """What `validate_contract.py --promote` vouches for: the contract less its status
+    and its own promotion stamp, as it sits on disk (before any in-memory normalizing)."""
+    body = {key: value for key, value in contract.items() if key not in ("status", "promotion")}
+    return hashlib.sha256(canonical_bytes(body)).hexdigest()
+
+
+def stamp_promotion(contract: dict) -> dict:
+    """Mark `contract` (in place) as promoted: what --promote writes beside `validated`."""
+    contract.pop("promotion", None)
+    contract["promotion"] = {"by": "validate_contract.py --promote", "sha256": promotion_digest(contract)}
+    return contract
+
+
+def require_promoted(contract: dict) -> None:
+    """The renderer's gate on who wrote `validated`: only --promote does, with a stamp over
+    the rest of the contract. A status typed in by hand, or an edit after promotion, renders
+    nothing (2026-09-24 gpt-5 prime-explicit set `validated` itself). Strict validation has
+    already refused a contract the bootstrap did not start."""
+    stamp = contract.get("promotion")
+    if not isinstance(stamp, dict) or stamp.get("sha256") != promotion_digest(contract):
+        raise ContractError("status validated was not written by validate_contract.py --promote, or the "
+                            "contract changed after it was: run validate_contract.py --promote again")
