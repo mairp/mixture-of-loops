@@ -894,6 +894,16 @@ class E2ELogicTests(unittest.TestCase):
                          [], "the host's own Claude Code skill sync")
         self.assertEqual(len(home_snapshot.diff(before, {**before, "/root/.claude/skills/mixture-of-loops": "dir"})), 1)
 
+    def test_reevaluate_drops_host_noise_from_a_recorded_home_diff(self) -> None:
+        sync = "added    /root/.claude/skills/synced/a_b/.last-complete-round (file:ff77)"
+        real = "added    /root/.pi/agent/skills/mixture-of-loops (dir)"
+        failed = {"name": "real-homes-unchanged", "status": "fail", "detail": sync}
+        self.assertEqual(run_harness_e2e.refiltered_home_verdict(failed, {})["status"], "pass")
+        self.assertEqual(run_harness_e2e.refiltered_home_verdict(failed, {"home_changes": [sync, real]})["status"], "fail")
+        cut = {**failed, "detail": "; ".join([sync] * 5)}
+        self.assertEqual(run_harness_e2e.refiltered_home_verdict(cut, {})["status"], "fail",
+                         "five shown may be a truncated list")
+
     def test_codex_gets_catalog_metadata_for_gpt_models_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "models_cache.json"

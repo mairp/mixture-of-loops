@@ -1046,6 +1046,7 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
                                   "text": c.text[:400]} for c in transcript.calls]
         summary["stop_reason"] = transcript.stop_reason
         summary["error_message"] = transcript.error_message
+        summary["home_changes"] = home_changes   # all of them: the verdict detail keeps five
         summary["verdicts"] = verdicts
         summary["status"] = mol_e2e.summarize(verdicts)
         redaction = redact(root, prepared.secrets)
@@ -1221,6 +1222,21 @@ def print_report(report: dict, color: bool) -> None:
               f"differing={row['differing'] or 'none'}")
 
 
+def refiltered_home_verdict(carried: dict, summary: dict) -> dict:
+    """real-homes-unchanged with home_snapshot.diff's current host-noise filters applied to
+    the changes the live run recorded: the full list where summary.json kept one, else the
+    verdict's own detail, which is complete only below the five entries it shows. Nothing
+    is re-observed; a filter added later can only drop what the host itself wrote."""
+    changes = summary.get("home_changes")
+    if changes is None:
+        shown = [part for part in carried.get("detail", "").split("; ") if part]
+        if len(shown) >= 5 or carried.get("status") != "fail":
+            return carried
+        changes = shown
+    kept = [line for line in changes if not home_snapshot.host_noise(line.split(maxsplit=1)[-1].split(" (")[0])]
+    return {**carried, "status": "fail" if kept else "pass", "detail": "; ".join(kept[:5])}
+
+
 def reevaluate(evidence: Path) -> int:
     """Recompute verdicts from a saved transcript and repository. Facts that only the live
     run could observe (timeout, exit status, reaped processes, home and checkout snapshots,
@@ -1278,7 +1294,8 @@ def reevaluate(evidence: Path) -> int:
                                                        *([] if evidence.resolve() in worked.resolve().parents
                                                          else [str(evidence)]),
                                                        *[str(evidence / o) for o in os.listdir(evidence) if o != run.name]])
-            verdicts = mol_e2e.evaluate(context) + [v for v in old["verdicts"] if v["name"] in carried]
+            verdicts = mol_e2e.evaluate(context) + [refiltered_home_verdict(v, old) if v["name"] == "real-homes-unchanged"
+                                                    else v for v in old["verdicts"] if v["name"] in carried]
             changed = {v["name"]: v["status"] for v in verdicts} != {v["name"]: v["status"] for v in old["verdicts"]}
             new = {**old, "verdicts": verdicts, "status": mol_e2e.summarize(verdicts), "reevaluated": True,
                    "original_status": old["status"],

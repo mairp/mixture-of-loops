@@ -80,11 +80,16 @@ OTHER_PROJECT_SESSION = re.compile(r"/\.dsh/sessions/--(?!tmp-)[^/]*--(/|$)")
 HOST_SKILL_SYNC = re.compile(r"/\.claude/skills/synced(/|$)")
 
 
+def host_noise(path: str) -> bool:
+    """A path the host's own tools write while a live run is going on."""
+    return bool(OTHER_PROJECT_SESSION.search(path) or HOST_SKILL_SYNC.search(path))
+
+
 def diff(before: dict[str, str], after: dict[str, str]) -> list[str]:
     changes = []
     for path in sorted(set(before) | set(after)):
         old, new = before.get(path), after.get(path)
-        if old == new or OTHER_PROJECT_SESSION.search(path) or HOST_SKILL_SYNC.search(path):
+        if old == new or host_noise(path):
             continue
         if old is None:
             changes.append(f"added    {path} ({new})")
