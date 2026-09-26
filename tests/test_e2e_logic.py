@@ -10,11 +10,13 @@ blocked-outcome variants.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -698,6 +700,225 @@ class E2ELogicTests(unittest.TestCase):
         self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "pass")
         context.transcript = mol_e2e.parse_claude_stream(lines[1:])
         self.assertEqual({v["name"]: v["status"] for v in mol_e2e.evaluate(context)}["skill-loaded"], "fail")
+
+
+def _tree_hashes(base: Path) -> dict[str, str]:
+    return {str(path.relative_to(base)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(base.rglob("*")) if path.is_file()}
+
+
+class RunRootTests(unittest.TestCase):
+    """Each run gets its own temporary root (issue #26): two runs' roots share no
+    ancestor closer than the system temp dir, and archive() moves one into the
+    evidence directory only after it is called, i.e. only after the process group is
+    gone -- byte-for-byte, never rewriting the model's own artifacts (a contract, a
+    launcher carrying its own digests). A recorded absolute path is instead translated
+    in memory, at grading time, via RunContext.root / mol_e2e._rebase."""
+
+    def temp_root(self) -> Path:
+        root = run_harness_e2e.run_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
+    def test_two_run_roots_share_no_ancestor_below_the_system_temp_dir(self) -> None:
+        first, second = self.temp_root(), self.temp_root()
+        self.assertNotEqual(first, second)
+        system_temp = Path(tempfile.gettempdir()).resolve()
+        self.assertEqual(first.resolve().parent, system_temp)
+        self.assertEqual(second.resolve().parent, system_temp)
+        # Neither is an ancestor of the other, and their lowest common ancestor is
+        # exactly the system temp dir -- not each other's, and not the evidence dir's.
+        self.assertNotIn(second, first.parents)
+        self.assertNotIn(first, second.parents)
+
+    def populated_root(self) -> Path:
+        """A stand-in for what a run leaves in its root before collection: a contract
+        that recorded its own (temporary) absolute root, a rendered launcher carrying
+        digests over its own content, and the raw transcript/stderr a harness would
+        have written."""
+        root = self.temp_root()
+        (root / "repo").mkdir()
+        (root / "repo" / "launch-contract.json").write_text(
+            json.dumps({"schema_version": "1.0", "sources": [], "repository": {"root": str(root / "repo")}},
+                      indent=2), encoding="utf-8")
+        (root / "repo" / "run-001-greeting.sh").write_text(
+            f"#!/bin/bash\n{mol_e2e.GENERATED_MARKER} contract-sha256=deadbeef "
+            "generated-content-sha256=cafef00d\necho hi\n", encoding="utf-8")
+        (root / "checkout").mkdir()
+        (root / "checkout" / "marker").write_text("checkout", encoding="utf-8")
+        (root / "transcript.jsonl").write_text(f'{{"cwd": "{root / "repo"}"}}\n', encoding="utf-8")
+        (root / "stderr.log").write_text(str(root), encoding="utf-8")
+        (root / "summary.json").write_text(json.dumps({"repo": str(root / "repo"), "root": str(root)}),
+                                           encoding="utf-8")
+        return root
+
+    def test_archive_moves_bytes_unchanged_and_evidence_is_complete(self) -> None:
+        root = self.populated_root()
+        before = _tree_hashes(root)
+        with tempfile.TemporaryDirectory() as evidence:
+            dest = Path(evidence) / "pi-explicit-greeting-ready"
+            run_harness_e2e.archive(root, dest)
+            self.assertFalse(root.exists(), "the temporary root is gone once it has been archived")
+            self.assertEqual(_tree_hashes(dest), before, "archive() must move every file byte-for-byte")
+            for relative in ("repo/launch-contract.json", "repo/run-001-greeting.sh", "checkout/marker",
+                             "transcript.jsonl", "stderr.log", "summary.json"):
+                self.assertIn(relative, before, f"missing from the fixture itself: {relative}")
+            # The model's own artifacts still name the old, now-gone temporary root:
+            # archive() never rewrites what the grader scores.
+            contract = json.loads((dest / "repo" / "launch-contract.json").read_text(encoding="utf-8"))
+            self.assertEqual(contract["repository"]["root"], str(root / "repo"))
+
+    def test_archive_keep_copies_bytes_unchanged_and_preserves_the_root(self) -> None:
+        root = self.populated_root()
+        before = _tree_hashes(root)
+        with tempfile.TemporaryDirectory() as evidence:
+            dest = Path(evidence) / "prime-implicit-greeting-blocked"
+            run_harness_e2e.archive(root, dest, keep=True)
+            self.assertTrue(root.is_dir(), "--keep-run-roots leaves the temporary root in place")
+            self.assertEqual(_tree_hashes(root), before, "the kept root itself is untouched")
+            self.assertEqual(_tree_hashes(dest), before, "the copy is byte-for-byte too")
+
+    def bootstrapped_repo(self, fixture: str, base: Path) -> Path:
+        """A real repo with a hand-completed contract (mirrors E2ELogicTests.repo()),
+        built directly under `base` so the contract's own repository.root records
+        wherever `base` is -- a run_root(), to set up the tests below. The contract
+        comes from the real bootstrap script, not a hand-made one, so
+        validate_contract.py's source-hash check has real hashes to verify."""
+        repo = mol_e2e.prepare_fixture(fixture, base / "repo")
+        contract = repo / "launch-contract.json"
+        result = mol_e2e.run_script("bootstrap_contract.py", "--repo", repo, "--feature", "specs/001-greeting",
+                                    "--output", contract, cwd=repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        draft = json.loads(contract.read_text(encoding="utf-8"))
+        contract.write_text(json.dumps(mol_e2e.reference_contract(draft, fixture), indent=2), encoding="utf-8")
+        return repo
+
+    def evidence_for_reevaluate(self, fixture: str, run_id: str, old_root: Path) -> Path:
+        """A run_root() populated as run_one() would leave it: a bootstrapped,
+        hand-completed contract and a summary.json naming this root."""
+        self.bootstrapped_repo(fixture, old_root)
+        (old_root / "transcript.jsonl").write_text("", encoding="utf-8")
+        (old_root / "summary.json").write_text(json.dumps({
+            "run": run_id, "harness": "pi", "mode": "explicit", "fixture": fixture,
+            "timed_out": False, "exit_code": 0, "verdicts": [], "status": "pass", "root": str(old_root)}),
+            encoding="utf-8")
+        return old_root
+
+    def test_reevaluate_validates_contract_hashes_after_materialising_the_root(self) -> None:
+        """The bug this fix exists for: validate_contract.py's check_source_hashes
+        hashes sources under the contract's own recorded repository.root -- an
+        in-memory path translation never reaches a subprocess, so reevaluate() must
+        materialise a copy of the evidence back at that exact path before grading, and
+        remove it again once this run's verdicts are in."""
+        cases = (("greeting-ready", "independent-validation-validated"),
+                 ("greeting-blocked", "independent-validation-blocked"))
+        for fixture, verdict_name in cases:
+            with self.subTest(fixture=fixture):
+                old_root = self.temp_root()
+                run_id = f"pi-explicit-{fixture}"
+                self.evidence_for_reevaluate(fixture, run_id, old_root)
+                with tempfile.TemporaryDirectory() as evidence_dir:
+                    evidence = Path(evidence_dir)
+                    run_harness_e2e.archive(old_root, evidence / run_id)   # byte-for-byte; still says old_root
+                    run_harness_e2e.reevaluate(evidence)
+                    self.assertFalse(old_root.exists(), "the materialised root is removed once grading is done")
+                    new = json.loads((evidence / run_id / "summary-reevaluated.json").read_text(encoding="utf-8"))
+                    verdicts = {v["name"]: v["status"] for v in new["verdicts"]}
+                    self.assertEqual(verdicts["sources-match-expectations"], "pass", verdicts)
+                    self.assertEqual(verdicts[verdict_name], "pass", verdicts)
+
+    def test_reevaluate_reuses_a_kept_root_without_deleting_it(self) -> None:
+        """A root a --keep-run-roots live run left in place (or one materialised by an
+        earlier reevaluate that was interrupted) is graded in place if it is genuinely
+        this run's own copy, and is not reevaluate()'s to remove."""
+        old_root = self.temp_root()
+        run_id = "pi-explicit-greeting-ready"
+        self.evidence_for_reevaluate("greeting-ready", run_id, old_root)
+        with tempfile.TemporaryDirectory() as evidence_dir:
+            evidence = Path(evidence_dir)
+            run_harness_e2e.archive(old_root, evidence / run_id, keep=True)   # leaves old_root in place too
+            run_harness_e2e.reevaluate(evidence)
+            self.assertTrue(old_root.is_dir(), "a root that already matched this run is left alone")
+            new = json.loads((evidence / run_id / "summary-reevaluated.json").read_text(encoding="utf-8"))
+            self.assertEqual({v["name"]: v["status"] for v in new["verdicts"]}["sources-match-expectations"], "pass")
+
+    def test_reevaluate_skips_a_root_collision_instead_of_guessing(self) -> None:
+        """A path summary.json names as "root" that exists but belongs to something
+        else (not this run) is never graded into or deleted -- reevaluate() skips that
+        run with a clear reason."""
+        old_root = self.temp_root()
+        run_id = "pi-explicit-greeting-ready"
+        self.evidence_for_reevaluate("greeting-ready", run_id, old_root)
+        colliding_root = self.temp_root()
+        (colliding_root / "summary.json").write_text(json.dumps({"run": "someone-elses-run"}), encoding="utf-8")
+        # Rewrite summary.json's "root" to point at the unrelated, already-occupied path.
+        summary = json.loads((old_root / "summary.json").read_text(encoding="utf-8"))
+        summary["root"] = str(colliding_root)
+        (old_root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as evidence_dir:
+            evidence = Path(evidence_dir)
+            run_harness_e2e.archive(old_root, evidence / run_id)
+            exit_status = run_harness_e2e.reevaluate(evidence)
+            self.assertFalse((evidence / run_id / "summary-reevaluated.json").exists(),
+                             "a colliding root must not be graded into")
+            self.assertEqual(json.loads((colliding_root / "summary.json").read_text(encoding="utf-8"))["run"],
+                             "someone-elses-run", "the unrelated root must not be touched either")
+            self.assertEqual(exit_status, 0, "a skip is not a failure")
+
+    def test_reevaluate_on_old_evidence_without_a_root_key_still_works(self) -> None:
+        """Backward compatibility: evidence from before this change has no "root" in
+        summary.json, because the run directory always *was* the repo's root -- built
+        here exactly that way, with no separate temporary root at any point, unlike
+        every other test in this class."""
+        run_id = "pi-explicit-greeting-ready"
+        with tempfile.TemporaryDirectory() as evidence_dir:
+            evidence = Path(evidence_dir)
+            run = evidence / run_id
+            run.mkdir()
+            self.bootstrapped_repo("greeting-ready", run)
+            (run / "transcript.jsonl").write_text("", encoding="utf-8")
+            (run / "summary.json").write_text(json.dumps({
+                "run": run_id, "harness": "pi", "mode": "explicit", "fixture": "greeting-ready",
+                "timed_out": False, "exit_code": 0, "verdicts": [], "status": "pass"}),  # no "root" key
+                encoding="utf-8")
+            run_harness_e2e.reevaluate(evidence)
+            new = json.loads((run / "summary-reevaluated.json").read_text(encoding="utf-8"))
+            verdicts = {v["name"]: v["status"] for v in new["verdicts"]}
+            self.assertEqual(verdicts["sources-match-expectations"], "pass")
+
+    def test_no_grader_access_catches_a_reference_to_another_runs_root(self) -> None:
+        """A model that only guesses at a sibling's (or a since-cleaned-up) temporary
+        root is still caught, the same way a read of the evidence directory is."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        repo = mol_e2e.prepare_fixture("greeting-ready", base / "repo")
+        other_root = "/tmp/mol-e2e-run-deadbeef"
+        script = happy_script("pi")
+        script.tool("bash", {"command": f"ls {other_root}/repo"}, error=True)
+        context = mol_e2e.RunContext(harness="pi", mode="explicit", fixture="greeting-ready", repo=repo,
+                                     transcript=mol_e2e.parse_transcript(script.end()), work=base,
+                                     grader_paths=[other_root])
+        verdicts = {v["name"]: v["status"] for v in mol_e2e.evaluate(context)}
+        self.assertEqual(verdicts["no-grader-access"], "fail")
+
+    def test_no_grader_access_catches_a_read_of_the_evidence_directory_itself(self) -> None:
+        """`ls ../..` from root/repo lands in the system temp dir, which may hold the
+        evidence directory (mol-e2e-evidence-*) one level down. run_one() puts
+        str(evidence) itself in grader_paths (not just its sibling run entries); this
+        proves the mechanism catches a call that mentions that directory."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        repo = mol_e2e.prepare_fixture("greeting-ready", base / "repo")
+        evidence_dir = "/tmp/mol-e2e-evidence-deadbeef"
+        script = happy_script("pi")
+        script.tool("bash", {"command": f"ls {evidence_dir}"}, error=True)
+        context = mol_e2e.RunContext(harness="pi", mode="explicit", fixture="greeting-ready", repo=repo,
+                                     transcript=mol_e2e.parse_transcript(script.end()), work=base,
+                                     grader_paths=[evidence_dir])
+        verdicts = {v["name"]: v["status"] for v in mol_e2e.evaluate(context)}
+        self.assertEqual(verdicts["no-grader-access"], "fail")
 
 
 if __name__ == "__main__":

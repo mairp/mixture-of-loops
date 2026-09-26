@@ -511,6 +511,14 @@ class RunContext:
     expect_execution: bool = False                # the run was asked to execute the pipeline
     work: Path | None = None                      # scratch for the dry-run stub log
     grader_paths: list[str] = field(default_factory=list)   # a tool call mentioning one is contamination
+    # The root this evaluation actually ran at: repo's own parent, on disk, at grading
+    # time. A live run's root is its temporary root (tests/e2e/run_harness_e2e.py's
+    # summary.json "root"); --reevaluate materialises a copy of the evidence at that
+    # same path first (validate_contract.py hashes sources under the contract's own
+    # recorded repository.root, so grading has to happen there, not just read paths
+    # translated in memory) and sets this to it. Informational for mol_e2e itself; the
+    # #22 work uses it for a stayed-in-scope verdict.
+    root: Path | None = None
 
 
 def verdict(name: str, ok: bool | None, detail: str = "") -> dict:
