@@ -29,8 +29,7 @@ $mixture-of-loops derive a pipeline for specs/007-example
 ```
 
 A plain request that matches the skill description also works where the harness offers
-description-based invocation (Codex, Claude Code, pi, prime); see the tested results below
-for how reliably a local model does this.
+description-based invocation (Codex, Claude Code, pi, prime, dsh).
 
 The skill inventories the supplied feature artifacts, records their provenance in a launch
 contract, validates the contract, and renders a Bash launcher.
@@ -175,9 +174,13 @@ command or policy the plan named was never exercised. So facts and judgment are 
 The bootstrap only records what is literally in the files, and marks the contract `draft`
 with an open blocker. The model then fills in the parts that need reading — what a task
 means, when a prerequisite must hold, which stage enforces it — and every entry it adds
-carries a source path, a line, and the evidence it is expected to produce. The renderer
-refuses anything still `draft`, stale, or blocked, so an unreviewed pipeline cannot become
-an executable script.
+carries a source path, a line, and the evidence it is expected to produce. The model never
+writes the status either: `validate_contract.py --promote` sets `validated` only when the
+strict check passes and sets `draft` back otherwise, and the renderer refuses anything
+still `draft`, stale, or blocked, so an unreviewed pipeline cannot become an executable
+script. Paths a prerequisite names are resolved by the bootstrap against the repository
+root, with an existence flag, so an absent approval is a fact the model reads rather than
+a base directory it guesses.
 
 The contract is the artifact; the launcher is disposable. Sources are hashed (with task
 checkboxes normalized, so progress is not mistaken for a requirements change) and the
@@ -341,8 +344,11 @@ python3 -m unittest tests.test_harness_discovery -v
 # Echoes every message the supervisor emitted, scenario by scenario.
 MOL_SHOW_MESSAGES=1 python3 -m unittest tests.test_execution_e2e -v
 
-# Everything, including the live headless runs (opt-in; local model only)
+# Everything, including the live headless runs (opt-in). One model per campaign:
+# the local qwen3.8-27b-q5 by default; --model muse-glimmer-30b | nemotron-lightning-30b |
+# compass (claude-opus-4.8 through the local shim, what plain `bebop` runs)
 MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all
+MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all --model compass
 
 # The run/auto path, live: the model must read the request as `auto`, clear the
 # gate, launch detached, and report the run from its own telemetry
@@ -391,12 +397,24 @@ MOL_LIVE_E2E=1 python3 tests/e2e/run_harness_e2e.py --harness all --mode auto --
   read-only `--dry-run` with a refusing stub `specstride` on `PATH`. Every run uses a
   temporary `HOME`, agent directory, `TMPDIR` and daemon socket, telemetry off, and a
   pristine copy of `bin/` and `skills/`, so a model cannot follow the skill link to this
-  repository's tests. The real `~/.pi`, `~/.prime`, `~/.agents` and `~/.claude/skills` are
-  snapshotted before and compared after each run. Only `qwen3.8-27b-q5` is allowed (pi
-  `litellm/qwen3.8-27b-q5`, prime variant `qwen`, Claude Code through the local shim, Codex
-  through LiteLLM); the runner skips instead of forcing a llama-swap model swap. Evidence
-  (transcripts, repositories, per-run `summary.json`, `report.json`) goes to a new
-  temporary directory; `--reevaluate DIR` re-scores saved runs without calling a model.
+  repository's tests. The real `~/.pi`, `~/.prime`, `~/.agents`, `~/.dsh` and
+  `~/.claude/skills` are snapshotted before and compared after each run. One model per
+  campaign (`--model`): a local llama-swap model — `qwen3.8-27b-q5` by default,
+  `muse-glimmer-30b`, `nemotron-lightning-30b` — or `compass`, claude-opus-4.8 through the
+  local cc-compass-shim. Each harness is bound to it the way the fleet's own launchers bind
+  it (pi `litellm/<id>` or `compass-shim/…`, prime's variant, Codex through LiteLLM's
+  Responses route, Claude Code through the shim exactly as `bebop <backend>`, dsh from a
+  temporary `DSH_HOME` whose `settings.yaml` names one provider and one model), the launch
+  is refused if any slot names anything else, and a dsh run must show that model answering
+  in its session (`model-pinned`). Before a harness's first cell the runner sends one real
+  completion down its exact route; a route that does not answer, or a run that dies on an
+  upstream, transport, routing or auth error, is reported as **`infra`** — the serving
+  stack, not the skill or the harness — and the cell is re-run once the route answers again
+  (`--retry-infra`, default 1; the first attempt stays in `report.json` under
+  `superseded_runs`). The runner skips a local model while llama-swap holds another one
+  unless `--allow-swap` is given. Evidence (transcripts, repositories, per-run
+  `summary.json`, `report.json`) goes to a new temporary directory; `--reevaluate DIR`
+  re-scores saved runs without calling a model.
 
   `--mode auto` adds a third prompt per harness — "derive a pipeline for
   specs/001-greeting **and run it**" — in which the only correct behaviour is to read the
@@ -435,97 +453,3 @@ and the other is `ci` passing. Both halves are tested. A deliberately failing pu
 was refused by all of it — `ci` failed, Mergify held `ci-must-pass` open while the label
 condition sat satisfied, the queue never took it, and an administrator merge was rejected
 with `the base branch policy prohibits the merge`.
-
-### Results on 2026-09-19
-
-Tested with pi 0.80.6, prime-agent 0.7.3 (launcher `c9f77c3`), Codex CLI 0.153.4, Claude
-Code 2.1.278 and dsh 0.1.0-rc.8, on the local `qwen3.8-27b-q5` with thinking off. One
-sample per cell unless noted; a local model is not deterministic.
-
-| | pi | prime | Codex | Claude Code | dsh |
-| --- | --- | --- | --- | --- | --- |
-| Tier 1 | pass (44 tests) | pass | pass | pass | pass |
-| Tier 2 | pass | pass | not in scope | not in scope | not in scope |
-| Tier 3 `/skill:` or `$`/`/` form, blocked fixture | pass | 1 of 2 passed | pass | failed: model endpoint 500 | skipped |
-| Tier 3 `/skill:` or `$`/`/` form, ready fixture | pass | failed in 2 of 2 | pass | failed: model endpoint 500 | skipped |
-| Tier 3 plain request, blocked fixture | failed | failed | not run | not run | skipped |
-| Tier 3 plain request, ready fixture | pass | failed | not run | not run | skipped |
-| Deterministic facts identical across harnesses | yes | yes | yes | no contract | skipped |
-
-What the failures were:
-
-- pi and prime ran the rendered launcher **without** `--dry-run` as one of SKILL.md step 8's
-  "further stubbed checks", against whatever `specstride` was on `PATH` (here the refusing
-  stub, so nothing ran). This is the only failure in pi plain-request/blocked and in both
-  prime explicit/ready samples. With a real `specstride` it would start a pipeline.
-- prime sometimes ran the scripts through Python `subprocess` instead of `%%bash` or `!`
-  (counted as a failure), and in one plain-request run validated the blocked fixture,
-  relying on a runtime preflight check instead of stopping derivation as PRE-001 requires.
-- Claude Code: every request through the shim returned `500 qwen upstream error` from the
-  qwen chat template in llama.cpp; the serving route, not this package.
-- dsh has no per-run model flag; its model comes from `$DSH_HOME/settings.yaml` (off-host by
-  default), and a temporary `DSH_HOME` re-installs its plugins over the network, so it was
-  not run.
-- Codex: `codex exec --json` does not report `$skill` injection; skill use was confirmed by
-  its reads of `references/` under the skill directory.
-
-Tested rather than inferred: discovery paths, trust, deduplication and collisions for pi
-and prime (Tier 2, from the installed loaders); headless invocation, script execution,
-contract validity and the launcher dry-run for the cells marked pass. Inferred from the
-installed sources only: prime's daemon behaviour and `prime-agent shutdown` scope,
-telemetry switches, and the Codex, Claude Code and dsh discovery paths documented above
-(their live runs cover repository-scope `.agents/skills` and `.claude/skills` only).
-
-### `auto` results on 2026-09-20
-
-One live run per harness of
-`run_harness_e2e.py --harness all --mode auto --fixture ready`, on the same local
-`qwen3.8-27b-q5` with thinking off. The prompt is "derive a pipeline for
-specs/001-greeting **and run it**", and the pipeline-acting stub replaces the refusing one
-so there is a real run to supervise.
-
-| | pi | prime | Codex | Claude Code | dsh |
-| --- | --- | --- | --- | --- | --- |
-| Overall | pass (36 assertions) | pass (36) | pass (36) | pass (36) | skipped |
-| Chose `auto` from the prose | yes | yes | yes | yes | — |
-| Launched detached, run reached `completed` | yes | yes | yes | yes | — |
-| Reported an intermediate state from telemetry | yes | yes | yes | yes | — |
-| Final digest matches the launcher's `DIGEST` | yes | yes | yes | yes | — |
-| No leftover process, lock or unannounced relaunch | yes | yes | yes | yes | — |
-| Seconds | 537 | 331 | 615 | 1776 | — |
-
-Deterministic facts were identical across every harness that produced a contract. dsh was
-skipped for the same reason as before — no local backend within the boundaries.
-
-Three things had to be fixed before those cells passed, and each is worth knowing:
-
-- prime ran the skill's scripts through Python `subprocess` instead of `%%bash` or `!` —
-  the behaviour recorded in the 2026-09-19 table above. `SKILL.md` now says in one line
-  that a fenced block is a command line and that a wrapper is where the working directory,
-  the environment and the quoting get lost. prime then used `%%bash` for all nine calls.
-- Claude Code could not reach the local model at all: `500 qwen upstream error`. The cause
-  was outside this package — Claude Code sends `role: "system"` turns *inside* `messages`
-  (its environment preamble, and reminders re-sent each turn), the local Anthropic shim
-  passed the role straight through, and qwen's chat template raises "System message must
-  be at the beginning" for any system turn after the first. The shim now folds every such
-  turn into the single leading system message; its own suite covers it.
-- Claude Code's Bash tool then moved the long-running `supervise.py auto` into the
-  background, so the `[MOL-*]` lines landed in a host-specific task file rather than the
-  tool result. It recovered by reading that file — correctly — which exposed two gaps:
-  the supervisor now also appends every message to `runs/<id>/harness-report.log`, a path
-  this skill owns, and `SKILL.md` says to read it when the stream is lost.
-- Claude Code then rendered the launcher and went back to re-checking the ignore rule
-  instead of launching, until the wall clock ended the run. `SKILL.md` step 9 now says
-  where `auto` goes next: the generated artifacts are complete, go straight to the gate,
-  and do not revisit the generation steps. `--mode auto` also gets its own wall-clock
-  budget (`AUTO_TIMEOUT`, 1800s), because it runs and supervises a pipeline on top of
-  deriving one. This local model is slow and variable on the derivation half — the same
-  half the generation-only modes run — so that cell sits nearer its budget than the rest.
-
-Three of the runtime's documented behaviours turned out to be wrong when checked against
-the code, and each correction is recorded where it is acted on rather than in a separate
-note: an exhausted in-stage recovery records `exit`, not `recovery-exhausted`
-(`supervisor_lib.TRANSIENT_STAGE_REASONS`); exits `20` and `23` print before the launcher
-log exists, so they only reach the harness launch log; and `launcher.log` is shared across
-runs of a pipeline, so the supervisor records a byte offset at launch and reads only past
-it (both in [references/contract.md](skills/mixture-of-loops/references/contract.md)).

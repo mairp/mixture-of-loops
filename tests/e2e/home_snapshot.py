@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Snapshot the real harness homes so a test can prove it left them untouched.
 
-The snapshot lists every path under ~/.pi, ~/.prime, ~/.agents and ~/.claude/skills
+The snapshot lists every path under ~/.pi, ~/.prime, ~/.agents, ~/.dsh and ~/.claude/skills
 (which covers ~/.pi/agent/trust.json and ~/.prime/supervisor-owners/) with its type,
 its link target or its SHA-256. Symlinks are recorded, never followed. The real home
 comes from the password database, so a temporary HOME in the environment cannot
@@ -22,7 +22,7 @@ from pathlib import Path
 import pwd
 import sys
 
-RELATIVE_ROOTS = (".pi", ".prime", ".agents", ".claude/skills")
+RELATIVE_ROOTS = (".pi", ".prime", ".agents", ".dsh", ".claude/skills")
 
 
 def real_home() -> Path:

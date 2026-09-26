@@ -110,6 +110,7 @@ class Transcript:
     events: int = 0
     bad_lines: int = 0
     skill_invoked: list[str] = field(default_factory=list)   # harness-level skill invocations
+    models: list[str] = field(default_factory=list)          # model ids the harness recorded as answering
 
 
 def _ipython_shell(code: str) -> tuple[str | None, str]:
@@ -277,8 +278,65 @@ def parse_codex_stream(lines: Iterable[str]) -> Transcript:
     return transcript
 
 
+def parse_dsh_session(lines: Iterable[str]) -> Transcript:
+    """dsh's session JSONL (decompressed) into the same shape.
+
+    Headless dsh prints only the final message on stdout; the session under $DSH_HOME
+    records `tool/call` (name, callId, JSON-string arguments), `tool/result` (content
+    per toolCallId, isError), `turn/end` (reason.kind completed|aborted|error) and, in
+    `request/context` and each `assistant/message` source, the provider/model that
+    answered -- which is how a run proves it stayed on the configured model.
+    """
+    transcript = Transcript()
+    by_id: dict[str, ToolCall] = {}
+    for event in _json_lines(lines, transcript):
+        kind = event.get("type")
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if kind == "tool/call":
+            arguments = data.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {"raw": arguments}
+            call = classify(ToolCall(id=str(data.get("callId")), tool=str(data.get("name")),
+                                     args=arguments if isinstance(arguments, dict) else {}))
+            if call.tool == "skill":
+                transcript.skill_invoked.append(str(call.args.get("name", "")))
+            by_id[call.id] = call
+            transcript.calls.append(call)
+        elif kind == "tool/result":
+            message = data.get("message") if isinstance(data.get("message"), dict) else {}
+            for item in message.get("content") or []:
+                if not isinstance(item, dict) or item.get("type") != "tool-result":
+                    continue
+                call = by_id.get(str(item.get("toolCallId")))
+                if call is not None:
+                    call.is_error = bool(item.get("isError"))
+                    call.result = _text(item.get("content"))
+        elif kind == "user/message":
+            transcript.user_texts.append(_text(data.get("content")))
+        elif kind == "request/context":
+            if data.get("model"):
+                transcript.models.append(str(data["model"]))
+        elif kind == "assistant/message":
+            source = ((data.get("message") or {}).get("source") or {}) if isinstance(data.get("message"), dict) else {}
+            if isinstance(source, dict) and source.get("model"):
+                transcript.models.append(str(source["model"]))
+        elif kind == "turn/end":
+            reason = data.get("reason") if isinstance(data.get("reason"), dict) else {}
+            outcome = str(reason.get("kind") or "")
+            transcript.agent_end = True
+            transcript.stop_reason = "stop" if outcome == "completed" else (outcome or "error")
+            if outcome != "completed":
+                inner = reason.get("reason")
+                transcript.error_message = json.dumps(inner) if inner is not None else outcome
+    transcript.models = sorted(set(transcript.models))
+    return transcript
+
+
 PARSERS = {"pi": parse_transcript, "prime": parse_transcript, "claude": parse_claude_stream,
-           "codex": parse_codex_stream}
+           "codex": parse_codex_stream, "dsh": parse_dsh_session}
 
 
 # ── contract inspection ───────────────────────────────────────────────────────

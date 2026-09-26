@@ -42,6 +42,13 @@ Every entry needs a stable ID, source path and line/anchor, rationale, enforcing
 command, and expected evidence. Optional and out-of-scope entries need a reason. Unresolved
 or autonomy-incompatible execution requirements need an open blocker.
 
+A prerequisite's path is relative to the repository root unless its source says
+otherwise; the bootstrap resolves each one into `inventory.prerequisites` with a `present`
+flag, and that flag, not a guess about the base directory, decides whether an authority
+exists. An absent non-delegable authority is an open blocker anchored at the prerequisite's
+line, and the contract stays a draft; a stage precondition on the same path is not a
+substitute, because it would only fail at run time what must block derivation.
+
 ## Verification reconciliation
 
 When `verification-commands.json` exists, preserve it as authored input and compare it to
