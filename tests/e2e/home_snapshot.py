@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import sys
 
 RELATIVE_ROOTS = (".pi", ".prime", ".agents", ".dsh", ".claude/skills")
@@ -68,11 +69,28 @@ def take(home: Path | None = None) -> dict[str, str]:
     return dict(sorted(snapshot.items()))
 
 
+# dsh keeps one session directory per project, named after its working directory
+# (/root/foo -> --root-foo--). A live run works in a temporary root, so its sessions
+# could only ever land under a --tmp-mol-e2e-run-… name (mkdtemp's prefix); any other
+# project's session is the host's own dsh use going on meanwhile (2026-09-24:
+# /root/agentic-netops-srl; 2026-09-25: another Claude Code session's /tmp scratchpad).
+OTHER_PROJECT_SESSION = re.compile(r"/\.dsh/sessions/--(?!tmp-mol-e2e-run-)[^/]*--(/|$)")
+# Claude Code's account skill sync cache. A live run's Claude Code has a temporary HOME,
+# so only the host's own Claude Code sessions write the real one (2026-09-25: the
+# supervising session's sync rounds failed gpt-5 pi-auto, which never touches ~/.claude).
+HOST_SKILL_SYNC = re.compile(r"/\.claude/skills/synced(/|$)")
+
+
+def host_noise(path: str) -> bool:
+    """A path the host's own tools write while a live run is going on."""
+    return bool(OTHER_PROJECT_SESSION.search(path) or HOST_SKILL_SYNC.search(path))
+
+
 def diff(before: dict[str, str], after: dict[str, str]) -> list[str]:
     changes = []
     for path in sorted(set(before) | set(after)):
         old, new = before.get(path), after.get(path)
-        if old == new:
+        if old == new or host_noise(path):
             continue
         if old is None:
             changes.append(f"added    {path} ({new})")

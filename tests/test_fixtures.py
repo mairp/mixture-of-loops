@@ -144,6 +144,135 @@ class FixtureTests(unittest.TestCase):
         exclusive = mol_e2e.run_script("validate_contract.py", "--promote", "--allow-draft", contract, cwd=repo)
         self.assertEqual(exclusive.returncode, 2)
 
+    def test_strict_validation_names_three_quiet_derivation_mistakes(self) -> None:
+        """From the 2026-09-23 campaign: a preflight check filed under postconditions (the
+        runtime never runs it before the pipeline), the bootstrap's `unclassified` producer
+        left in place, and a present prerequisite no stage checks; and from 2026-09-24,
+        file_exists on a directory and a contract written without the bootstrap."""
+        base = self.workspace()
+        repo, draft = self.bootstrap(base, "greeting-ready")
+        contract = repo / "launch-contract.json"
+        reference = mol_e2e.reference_contract(draft, "greeting-ready")
+
+        def validate(change) -> subprocess.CompletedProcess[str]:
+            value = json.loads(json.dumps(reference))
+            change(value)
+            contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+            return mol_e2e.run_script("validate_contract.py", contract, cwd=repo)
+
+        clean = validate(lambda value: None)
+        self.assertEqual((clean.returncode, clean.stderr), (0, ""))
+        moved = validate(lambda value: value["stages"][0]["postconditions"].append(
+            {"type": "file_exists", "path": "approvals/release-approval.json", "timing": "preflight"}))
+        self.assertEqual(moved.returncode, 20)
+        self.assertIn("timing preflight applies to preconditions only", moved.stderr)
+        placeholder = validate(lambda value: value["coverage"][0].update(producer="unclassified"))
+        self.assertEqual(placeholder.returncode, 20)
+        self.assertIn("producer is still the bootstrap's `unclassified`", placeholder.stderr)
+        self.assertEqual(validate(lambda value: value["coverage"][0].update(producer="release-manager")).returncode, 0,
+                         "a producer in the model's own words is its call")
+        unknown_stage = validate(lambda value: value["coverage"][0].update(producer="stage:nowhere"))
+        self.assertEqual(unknown_stage.returncode, 20)
+        self.assertIn("producer stage:nowhere names no stage", unknown_stage.stderr)
+
+        def hand_implemented(value: dict) -> None:   # 2026-09-23 gpt-5: the model wrote the code into a stage
+            value["stages"][0].update(kind="setup", action={"argv": ["python3", "-c", "open('src/greet.py','w')"],
+                                                            "timeout_seconds": 60})
+        self_implemented = validate(hand_implemented)
+        self.assertEqual(self_implemented.returncode, 20)
+        self.assertIn("implementation obligation mapped to no specstride stage", self_implemented.stderr)
+
+        def unwritten_plan(value: dict) -> None:   # 2026-09-24 gpt-5 pi-implicit
+            value["stages"][0]["action"]["argv"] += ["--verification-commands", "verification-commands.json"]
+        missing_plan = validate(unwritten_plan)
+        self.assertEqual(missing_plan.returncode, 20)
+        self.assertIn("--verification-commands verification-commands.json, which does not exist or is empty", missing_plan.stderr)
+        (repo / "verification-commands.json").write_text("{}", encoding="utf-8")
+        not_an_object = validate(unwritten_plan)   # 2026-09-25 gpt-5 pi-auto: a bare list, cwd "."
+        self.assertEqual(not_an_object.returncode, 20)
+        self.assertIn("is not an object with a non-empty `commands` array", not_an_object.stderr)
+        entry = {"id": "unit-tests", "executable": "python3", "args": ["-m", "unittest"], "cwd": "."}
+        (repo / "verification-commands.json").write_text(json.dumps({"commands": [entry]}), encoding="utf-8")
+        partial = validate(unwritten_plan)
+        self.assertEqual(partial.returncode, 20)
+        for missing in ("phase must be a positive integer", "timeoutSec must be a positive integer",
+                        "cwd must be an absolute path"):
+            self.assertIn(missing, partial.stderr)
+        entry.update(phase=2, timeoutSec=600, cwd=str(repo))
+        (repo / "verification-commands.json").write_text(json.dumps({"commands": [entry]}), encoding="utf-8")
+        self.assertEqual(validate(unwritten_plan).returncode, 0)
+
+        def unchecked(value: dict) -> None:   # 2026-09-24 gpt-5 codex-auto, prime-auto promoted past the warning
+            for stage in value["stages"]:
+                stage["preconditions"] = [c for c in stage["preconditions"] if c["type"] != "file_exists"]
+        refused = validate(unchecked)
+        self.assertEqual(refused.returncode, 20, refused.stderr)
+        self.assertIn("PRE-001 names `approvals/release-approval.json`, which exists, but no stage precondition",
+                      refused.stderr)
+
+        def explained(value: dict) -> None:   # a prerequisite that gates nothing says so at its own line
+            unchecked(value)
+            line = next(e for e in value["inventory"]["prerequisites"] if e["present"])["source"]
+            value["findings"].append({"id": "approval-read-only", "severity": "info", "status": "accepted",
+                                      "message": "read for context only", "source": line, "resolution": "none"})
+        self.assertEqual(validate(explained).returncode, 0)
+
+        def directory(value: dict) -> None:   # 2026-09-24 qwen claude-auto
+            value["stages"][0]["postconditions"].append(
+                {"type": "file_exists", "path": ".specstride/features/001-greeting"})
+        on_directory = validate(directory)
+        self.assertEqual(on_directory.returncode, 20)
+        self.assertIn("which is a directory: use dir_exists", on_directory.stderr)
+        self.assertEqual(validate(lambda value: value["stages"][0]["postconditions"].append(
+            {"type": "file_exists", "path": "specs"})).returncode, 20, "a directory on disk now")
+        self.assertEqual(validate(lambda value: value["stages"][0]["postconditions"].append(
+            {"type": "dir_exists", "path": ".specstride/features/001-greeting"})).returncode, 0)
+
+        def invented_reason(value: dict) -> None:   # 2026-09-25 qwen went looking for these in specstride's source
+            value["stages"][0]["recovery"] = {"max_attempts": 2, "retry_exit_codes": [4], "backoff_seconds": [5],
+                                              "reason": {"jsonl": ".specstride/features/001-greeting/events.jsonl",
+                                                         "event": "run_stop", "field": "reason",
+                                                         "allowed": ["budget_exceeded"]}}
+        invented = validate(invented_reason)
+        self.assertEqual(invented.returncode, 20)
+        self.assertIn("'budget_exceeded', which Specstride never stops a retryable run with", invented.stderr)
+        self.assertEqual(validate(lambda value: (invented_reason(value), value["stages"][0]["recovery"]["reason"]
+                                                 .update(allowed=["wall_budget"]))).returncode, 0)
+
+        def hand_written(value: dict) -> None:   # 2026-09-24 gpt-5 prime-auto skipped the bootstrap
+            value.pop("generated_by")
+            value.pop("inventory")
+        by_hand = validate(hand_written)
+        self.assertEqual(by_hand.returncode, 20)
+        self.assertIn("not started by bootstrap_contract.py", by_hand.stderr)
+
+    def test_render_takes_validated_only_from_promote(self) -> None:
+        """2026-09-24 gpt-5 prime-explicit typed `validated` itself: only --promote's stamp renders."""
+        base = self.workspace()
+        repo, draft = self.bootstrap(base, "greeting-ready")
+        contract = repo / "launch-contract.json"
+        reference = mol_e2e.reference_contract(draft, "greeting-ready")
+
+        def render() -> subprocess.CompletedProcess[str]:
+            return mol_e2e.run_script("render_launcher.py", "--contract", contract,
+                                      "--output", repo / "run.sh", cwd=repo)
+
+        by_hand = dict(reference)
+        by_hand.pop("promotion")
+        contract.write_text(json.dumps(by_hand, indent=2), encoding="utf-8")
+        refused = render()
+        self.assertEqual(refused.returncode, 20, refused.stderr)
+        self.assertIn("not written by validate_contract.py --promote", refused.stderr)
+        self.assertFalse((repo / "run.sh").exists())
+        promoted = mol_e2e.run_script("validate_contract.py", "--promote", contract, cwd=repo)
+        self.assertIn("promoted to validated", promoted.stdout)
+        self.assertEqual(render().returncode, 0)
+        edited = json.loads(contract.read_text(encoding="utf-8"))
+        edited["stages"][0]["action"]["timeout_seconds"] += 1
+        contract.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+        (repo / "run.sh").unlink()
+        self.assertEqual(render().returncode, 20, "an edit after promotion needs promoting again")
+
     def test_reference_completion_has_exactly_one_correct_outcome(self) -> None:
         for fixture in mol_e2e.FIXTURE_NAMES:
             with self.subTest(fixture=fixture):

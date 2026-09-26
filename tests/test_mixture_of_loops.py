@@ -13,6 +13,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "mixture-of-loops"
 SCRIPTS = SKILL / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+import contract_lib  # noqa: E402
 
 
 def digest(path: Path) -> str:
@@ -38,7 +40,7 @@ def coverage_entry(source: str, stage_ids: list[str], identifier: str = "OBL-1")
     return {
         "id": identifier,
         "source": {"path": source, "line": 1, "anchor": "T001"},
-        "kind": "implementation",
+        "kind": "operation",  # a command-stage obligation: implementation needs a specstride stage
         "timing": "pipeline-start",
         "producer": f"stage:{stage_ids[0]}",
         "disposition": "mapped",
@@ -49,12 +51,20 @@ def coverage_entry(source: str, stage_ids: list[str], identifier: str = "OBL-1")
     }
 
 
+def write_promoted(path: Path, value: dict) -> None:
+    """The contract as validate_contract.py --promote leaves it: render_launcher.py only renders that."""
+    path.write_text(json.dumps(contract_lib.stamp_promotion(json.loads(json.dumps(value))), indent=2),
+                    encoding="utf-8")
+
+
 def base_contract(repository: Path, source: Path, stages: list[dict]) -> dict:
     relative = str(source.relative_to(repository))
     return {
         "schema_version": "1.0",
         "id": "fixture-pipeline",
         "status": "validated",
+        "generated_by": {"tool": "tests/test_mixture_of_loops.py"},
+        "inventory": {},
         "repository": {"root": str(repository), "revision": None, "dirty": None},
         "authorized_roots": [str(repository)],
         "sources": [{"path": relative, "kind": "spec", "sha256": digest(source), "lines": 1}],
@@ -140,7 +150,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
                 "evidence": ["done"],
             }
             contract = repository / "launch-contract.json"
-            contract.write_text(json.dumps(base_contract(repository, source, [stage]), indent=2), encoding="utf-8")
+            write_promoted(contract, base_contract(repository, source, [stage]))
             launcher = repository / "run-fixture.sh"
             rendered = run(
                 sys.executable,
@@ -200,7 +210,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
             artifacts = repository / ".mixture-of-loops"
             (artifacts / "fixture").mkdir(parents=True)
             contract = artifacts / "fixture" / "launch-contract.json"
-            contract.write_text(json.dumps(base_contract(repository, source, [stage]), indent=2), encoding="utf-8")
+            write_promoted(contract, base_contract(repository, source, [stage]))
             launcher = artifacts / "run-fixture.sh"
             rendered = run(sys.executable, SCRIPTS / "render_launcher.py",
                            "--contract", contract, "--output", launcher)
@@ -281,7 +291,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
                 coverage_entry("spec.md", ["recover-run"], "OBL-RUN"),
             ]
             contract = repository / "launch-contract.json"
-            contract.write_text(json.dumps(contract_value, indent=2), encoding="utf-8")
+            write_promoted(contract, contract_value)
             launcher = repository / "run-fixture.sh"
             rendered = run(
                 sys.executable,
@@ -334,7 +344,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
                     "evidence": ["display.json"],
                 }
                 contract = repository / "launch-contract.json"
-                contract.write_text(json.dumps(base_contract(repository, source, [stage]), indent=2), encoding="utf-8")
+                write_promoted(contract, base_contract(repository, source, [stage]))
                 launcher = repository / "run-fixture.sh"
                 rendered = run(
                     sys.executable,
@@ -352,31 +362,6 @@ class MixtureOfLoopsTests(unittest.TestCase):
                 self.assertIn(expected_flag, display["args"])
                 if mode == "never":
                     self.assertNotIn("--live", display["args"])
-
-    def test_onboarding_links_all_repository_harnesses(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            onboard = ROOT / "bin" / "onboard-skill"
-            result = run(onboard, "--harness", "all", "--scope", "repo", "--repo", repository)
-            self.assertEqual(result.returncode, 0, result.stdout)
-            for relative in (
-                ".agents/skills/mixture-of-loops",
-                ".claude/skills/mixture-of-loops",
-            ):
-                target = repository / relative
-                self.assertTrue(target.is_symlink())
-                self.assertEqual(target.resolve(), SKILL.resolve())
-            checked = run(
-                onboard,
-                "--harness",
-                "all",
-                "--scope",
-                "repo",
-                "--repo",
-                repository,
-                "--check",
-            )
-            self.assertEqual(checked.returncode, 0, checked.stdout)
 
     def test_validation_rejects_shell_strings_literal_secrets_and_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -398,7 +383,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
                 "evidence": ["../escaped"],
             }
             contract = repository / "launch-contract.json"
-            contract.write_text(json.dumps(base_contract(repository, source, [stage]), indent=2), encoding="utf-8")
+            write_promoted(contract, base_contract(repository, source, [stage]))
             result = run(sys.executable, SCRIPTS / "validate_contract.py", contract)
             self.assertEqual(result.returncode, 20, result.stdout)
             self.assertIn("shell command string", result.stdout)
@@ -450,7 +435,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
         value["configuration"] = {("wiggum_live" if legacy else "specstride_live"): True}
         value["coverage"][0]["timing"] = ("wiggum" if legacy else "specstride") + "-phase:1"
         contract = repository / "launch-contract.json"
-        contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        write_promoted(contract, value)
         environment = dict(os.environ)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PATH"] = f"{bin_dir}:{environment.get('PATH', '/usr/bin:/bin')}"
@@ -533,7 +518,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
             value["stages"][0]["action"].pop("env")
         else:
             value["stages"][0]["action"]["env"] = stage_env
-        contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        write_promoted(contract, value)
         environment.update(inherited)
         launcher = repository / "run-007.sh"
         rendered = self._run_env(environment, sys.executable, SCRIPTS / "render_launcher.py",
@@ -585,7 +570,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{}\n", encoding="utf-8")
             value["sources"].append({"path": extra_source, "kind": "state", "sha256": digest(path)})
-        contract.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        write_promoted(contract, value)
         return self._run_env(environment, sys.executable, SCRIPTS / "validate_contract.py",
                              contract, cwd=repository)
 

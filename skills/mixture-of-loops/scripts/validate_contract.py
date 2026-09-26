@@ -5,7 +5,9 @@
 hand. It validates the contract as if it were `validated`; when that passes it writes
 `validated` into the file, and when it does not it writes `draft` back (undoing a
 hand-set `validated`), prints every blocker, and exits 20. A contract with an open
-blocker therefore always stays a draft.
+blocker therefore always stays a draft. `validated` is written with a `promotion` stamp
+over the rest of the contract, and render_launcher.py renders nothing without a matching
+one: a hand-typed status, or an edit after promotion, needs --promote again.
 """
 
 from __future__ import annotations
@@ -18,11 +20,16 @@ from pathlib import Path
 import sys
 import tempfile
 
-from contract_lib import ContractError, StaleSourceError, load_contract, validate_contract, warn_if_not_shell_invoked
+from contract_lib import (ContractError, StaleSourceError, load_contract, promotion_digest, stamp_promotion,
+                          validate_contract, warn_if_not_shell_invoked)
 
 
 def write_status(path: Path, contract: dict, status: str) -> None:
+    """Write `status`; `validated` carries the stamp render_launcher.py checks, `draft` drops it."""
     contract["status"] = status
+    contract.pop("promotion", None)
+    if status == "validated":
+        stamp_promotion(contract)
     text = json.dumps(contract, indent=2, ensure_ascii=False) + "\n"
     handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False)
     with handle:
@@ -95,7 +102,9 @@ def main() -> int:
         return 20
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
-    if args.promote and original.get("status") != "validated":
+    stamp = original.get("promotion")
+    stamped = isinstance(stamp, dict) and stamp.get("sha256") == promotion_digest(original)
+    if args.promote and not (original.get("status") == "validated" and stamped):
         write_status(path, original, "validated")
         print(f"promoted to validated: {contract.get('id')}")
     state = contract.get("status", "unknown")

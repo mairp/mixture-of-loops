@@ -24,10 +24,16 @@ ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "skills" / "mixture-of-loops"
 SCRIPTS = SKILL / "scripts"
 FIXTURES = ROOT / "tests" / "fixtures"
+# What implementing the greeting tasks produces. The fixtures leave it out, so T001/T002
+# are genuinely pending; the execution stub copies it in, as a real specstride run would.
+IMPLEMENTATION = FIXTURES / "implementations" / "greeting"
 STUB_BIN = Path(__file__).resolve().parent / "stub-bin"
 EXEC_STUB_BIN = Path(__file__).resolve().parent / "exec-stub-bin"
 NAME = "mixture-of-loops"
 SCRIPT_NAMES = ("bootstrap_contract.py", "validate_contract.py", "render_launcher.py")
+# Every script SKILL.md says to run from a shell, supervise.py included: not all of them
+# get a ran:<script> verdict, but none may be run from a python cell.
+SHELL_ONLY_SCRIPTS = (*SCRIPT_NAMES, "supervise.py")
 GENERATED_MARKER = "# mixture-of-loops-generated:"
 FIXTURE_NAMES = ("greeting-blocked", "greeting-ready")
 
@@ -84,10 +90,16 @@ def run_script(name: str, *args: object, cwd: Path, timeout: int = 120) -> subpr
 
 # A python cell that executes (not merely reads) a script: subprocess, os.system/popen, %run, runpy.
 PYTHON_EXEC = {name: re.compile(r"(subprocess\.\w+|os\.(system|popen|exec\w*)|%run|runpy\.run_path)\b[^\n]*"
-                                + re.escape(name)) for name in SCRIPT_NAMES}
+                                + re.escape(name)) for name in SHELL_ONLY_SCRIPTS}
 TOOL_TIMEOUT = re.compile(r"Command timed out after \d+ seconds")
 SCRIPT_RUN = {name: re.compile(r"\bpython3?(?:\.\d+)?\s+(?:-\S+\s+)*[^\s;|&]*" + re.escape(name))
               for name in SCRIPT_NAMES}
+# What render_launcher.py prints, on stdout, only once the launcher is written: a render
+# inside a compound command whose later part failed still rendered.
+RENDERED = re.compile(r"^rendered \S", re.MULTILINE)
+# What a failing bootstrap_contract.py prints itself (argparse's parser.error, or a crash);
+# a compound command that failed elsewhere carries neither.
+BOOTSTRAP_ERROR = re.compile(r"bootstrap_contract\.py: error:|Traceback \(most recent call last\)")
 # What validate_contract.py --promote prints, on stdout, only when it writes `validated`
 # itself; a contract already hand-set to `validated` gets "valid validated ..." instead.
 PROMOTED = "promoted to validated"
@@ -108,6 +120,9 @@ TOOLING_SEARCH = re.compile(
     r"(which|whereis|locate|command\s+-v|type(\s+-\w+)?)\s+specstride\b"
     r"|\b(find|ls)\s+(-\S+\s+)*/(?=[\s;&|'\")]|$)"
     r"|(^|[\s;&|'\"(=/])\.\.(?=/|[\s;&|'\")]|$)", re.MULTILINE)
+# The test harness's own stubs and their logs: reading one is looking behind the curtain
+# (it is also how a model that searched for specstride finds out it is a stub).
+STUB_ACCESS = re.compile(r"(?<![\w-])(stub-bin/|(?:harness-)?(?:exec-)?stub-specstride\.jsonl|stub-dry-run-)")
 REAL_HOME = re.compile(r"(?<![\w./-])(/root(?![\w.-])|~(?=/|[\s;&|'\")]|$))|\$\{?HOME\b")
 PATH_ARGS = ("path", "file_path", "directory", "dir", "cwd")
 # Where SKILL_ROOT is inside a run's root: every harness is onboarded at repository
@@ -283,6 +298,12 @@ def parse_claude_stream(lines: Iterable[str]) -> Transcript:
     return transcript
 
 
+def _head_and_tail(output: str, keep: int = 4000) -> str:
+    """A long command output's start and end: what a script prints last (`rendered …`,
+    `promoted to validated`) sits at the end of a compound command's output."""
+    return output if len(output) <= 2 * keep else f"{output[:keep]}\n[…]\n{output[-keep:]}"
+
+
 def parse_codex_stream(lines: Iterable[str]) -> Transcript:
     """`codex exec --json` into the same shape (command executions are shell calls)."""
     transcript = Transcript()
@@ -295,7 +316,7 @@ def parse_codex_stream(lines: Iterable[str]) -> Transcript:
             call = ToolCall(id=str(item.get("id")), tool="command_execution", args={"command": text},
                             kind="shell", via="bash", text=text,
                             is_error=item.get("exit_code") not in (0, None) or item.get("status") == "failed",
-                            result=str(item.get("aggregated_output", ""))[:4000])
+                            result=_head_and_tail(str(item.get("aggregated_output", ""))))
             if re.search(rf"\b(cat|sed|head|less|nl)\b[^\n]*{NAME}/SKILL\.md", text):
                 transcript.calls.append(ToolCall(id=call.id + "-read", tool="read", args={}, kind="read",
                                                  text=text.split()[-1].strip("'\"")))
@@ -595,21 +616,54 @@ def _points_at(finding: dict, prerequisite: dict, repo: Path, root: Path) -> boo
     return source.get("line") == prerequisite["line"] or prerequisite["id"] in str(source.get("anchor", ""))
 
 
+# Content being written is not a place the model went: a heredoc body fed to cat or tee
+# (a file's text, e.g. a launcher's `$SCRIPT_DIR/..` or git's `# *~` template), the body
+# of an apply_patch, and a python string literal holding text rather than one path. A
+# heredoc fed to anything else (python3 -, bash, a pipe) is code the model ran and stays.
+HEREDOC = re.compile(r"<<-?[ \t]*\\?[\"']?(\w+)\\?[\"']?([^\n]*)\n(.*?)(?:^[ \t]*\1\b|\Z)",
+                     re.MULTILINE | re.DOTALL)
+FILE_WRITER = re.compile(r"\b(cat|tee)\b[^<]*$")   # apply_patch bodies: PATCH_BODY
+PATCH_BODY = re.compile(r"(\*\*\* Begin Patch\n)(.*?)(\*\*\* End Patch)", re.DOTALL)
+PYTHON_STRING = re.compile(r"(\"\"\"|''')(.*?)\1|([\"'])((?:\\.|(?!\3)[^\\\n])*)\3", re.DOTALL)
+
+
+def _written_content_removed(call: ToolCall) -> str:
+    text = PATCH_BODY.sub(lambda m: m.group(1) + "".join(line + "\n" for line in m.group(2).splitlines()
+                                                         if line.startswith("*** ")) + m.group(3), call.text)
+    if call.kind == "shell":
+        def heredoc(match: re.Match) -> str:
+            line = text[text.rfind("\n", 0, match.start()) + 1:match.start()]
+            if FILE_WRITER.search(line) and "|" not in match.group(2):
+                return match.group(0)[:match.start(3) - match.start()]
+            return match.group(0)
+        text = HEREDOC.sub(heredoc, text)
+    elif call.via == "python":
+        text = PYTHON_STRING.sub(lambda m: '""' if re.search(r"[\s=$]", m.group(2) or m.group(4) or "")
+                                 else m.group(0), text)
+    return text
+
+
 def strayed_calls(transcript: Transcript, root: Path) -> list[str]:
     """Calls that reached outside the repository and SKILL_ROOT, or searched for tooling.
 
-    Shell text, read paths and python cells are scanned whole; any other tool only by its
-    path-valued arguments, so a todo list or a file's content that merely mentions a path
-    is not a call to it. Inside the run's root, only repo/ and the checkout's skill copy
-    are in scope: its stub-bin/, home/, logs and the root itself are not.
+    Shell text, read paths and python cells are scanned whole, less the content they
+    write (see _written_content_removed); any other tool only by its path-valued
+    arguments, so a todo list or a file's content that merely mentions a path is not a
+    call to it. Inside the run's root, only repo/ and the checkout's skill copy are in
+    scope: its stub-bin/, home/, logs and the root itself are not -- though a bare `cd`
+    into the root, from where the model then names repo/ or checkout/ relatively, is.
     """
     outside = re.compile(re.escape(str(root)) + r"(?!" + "|".join(SCOPE_ALLOWED) + r")")
+    cd_root = re.compile(r"\bcd\s+([\"']?)" + re.escape(str(root)) + r"/?\1(?=\s*(?:&&|;|\|\||\n|$))")
     strayed = []
     for call in transcript.calls:
-        texts = ([call.text] if call.kind in ("shell", "read") or call.via == "python"
-                 else [str(call.args.get(key)) for key in PATH_ARGS if call.args.get(key)])
+        if call.kind in ("shell", "read") or call.via == "python":
+            texts = [cd_root.sub("cd .", _written_content_removed(call))]
+        else:
+            texts = [str(call.args.get(key)) for key in PATH_ARGS if call.args.get(key)]
         for text in texts:
-            match = outside.search(text) or REAL_HOME.search(text) or TOOLING_SEARCH.search(text)
+            match = (outside.search(text) or REAL_HOME.search(text) or TOOLING_SEARCH.search(text)
+                     or STUB_ACCESS.search(text))
             if match:   # the stretch around what matched, which may sit deep in a long call
                 strayed.append(text[max(0, match.start() - 60):match.end() + 80])
     return strayed
@@ -632,7 +686,10 @@ def evaluate(context: RunContext) -> list[dict]:
     # SKILL.md itself, or a resource only the skill points to (references/, assets/): harnesses that do
     # not echo the expanded skill (Claude Code stream-json, codex --json) still show the model using it.
     resource = re.compile(rf"{NAME}/(SKILL\.md|references/|assets/)")
-    read = [c.text for c in transcript.calls if (c.kind == "read" or c.via == "python" or c.tool == "command_execution")
+    # a shell call counts too: prime reads SKILL.md with `sed -n` in a %%bash cell (2026-09-25
+    # gpt-5 prime-implicit, blocked fixture)
+    read = [c.text for c in transcript.calls
+            if (c.kind in ("read", "shell") or c.via == "python" or c.tool == "command_execution")
             and resource.search(c.text)]
     invoked = [name for name in transcript.skill_invoked if name.lstrip("/$").startswith(NAME)]
     loaded = expanded or bool(read) or bool(invoked)
@@ -652,18 +709,30 @@ def evaluate(context: RunContext) -> list[dict]:
             results.append(verdict(f"ran:{script}", None, f"not required for the blocked outcome; {detail}"))
         else:
             results.append(verdict(f"ran:{script}", bool(calls), detail))
-    bootstrap_ok = any(c.is_error is False for c in runs["bootstrap_contract.py"])
+    # A shell call has one exit status for its whole command: a bootstrap chained ahead of
+    # a promote that refused (exit 20), or of a typo, still wrote its draft. So a failed
+    # call whose command goes on past the bootstrap counts when bootstrap printed no error
+    # of its own and a contract is on disk; a bootstrap alone that failed never does.
+    contract_path = locate_contract(context.repo, transcript)
+
+    def chained_bootstrap_ran(call: ToolCall) -> bool:
+        match = SCRIPT_RUN["bootstrap_contract.py"].search(call.text)
+        rest = call.text[match.end():] if match else ""
+        return (contract_path is not None and bool(re.search(r"(&&|;|\n)\s*\S", rest))
+                and not BOOTSTRAP_ERROR.search(call.result))
+
+    bootstrap_ok = any(c.is_error is False or chained_bootstrap_ran(c) for c in runs["bootstrap_contract.py"])
     results.append(verdict("bootstrap-succeeded", bootstrap_ok,
-                           "at least one bootstrap call returned without a tool error"))
+                           "at least one bootstrap call returned without a tool error, or failed only past "
+                           "the bootstrap (a later command in it) with no bootstrap error and a contract on disk"))
     other_python = [c for c in transcript.calls if c.via == "python" and any(PYTHON_EXEC[s].search(c.text)
-                                                                             for s in SCRIPT_NAMES)]
+                                                                             for s in SHELL_ONLY_SCRIPTS)]
     reminded = [c for c in transcript.calls if SHELL_REMINDER in c.result]
     results.append(verdict("scripts-only-via-shell", not other_python,
                            f"{len(other_python)} ipython call(s) ran a script outside %%bash/!; script calls via "
                            f"{sorted({c.via for calls in runs.values() for c in calls})}; "
                            f"{len(reminded)} result(s) carried the MOL_VIA=shell reminder"))
 
-    contract_path = locate_contract(context.repo, transcript)
     results.append(verdict("contract-on-disk", contract_path is not None, str(contract_path)))
     contract: dict = {}
     if contract_path is not None:
@@ -702,8 +771,15 @@ def evaluate(context: RunContext) -> list[dict]:
                                    f"status={contract.get('status')}"))
         else:
             promoted = [c for c in promotes if PROMOTED in c.result]
-            results.append(verdict("status-owned-by-promote", bool(promoted),
-                                   f"{len(promotes)} --promote call(s), {len(promoted)} printed {PROMOTED!r}"))
+            # The stamp --promote writes beside `validated` is the file's own proof; Codex now
+            # and then returns a command's output without its stdout (2026-09-24 and -25
+            # codex-implicit: a stamped contract, an empty or echo-only promote result).
+            stamp = contract.get("promotion")
+            stamped = bool(promotes) and contract.get("status") == "validated" and isinstance(stamp, dict) \
+                and stamp.get("sha256") == _contract_lib().promotion_digest(contract)
+            results.append(verdict("status-owned-by-promote", bool(promoted) or stamped,
+                                   f"{len(promotes)} --promote call(s), {len(promoted)} printed {PROMOTED!r}; "
+                                   f"promotion stamp {'matches' if stamped else 'absent or stale'}"))
         # The bootstrap resolves each prerequisite path and records whether it exists; a
         # contract that kept the inventory must still say so (dropping it is allowed).
         inventory = contract.get("inventory")
@@ -749,8 +825,9 @@ def evaluate(context: RunContext) -> list[dict]:
             enforced = [c for c in checks if str(c.get("path", "")).endswith(prerequisite["file"])]
             results.append(verdict("prerequisite-enforced", bool(enforced),
                                    f"checks on {prerequisite['file']}: {enforced}"))
-        results.append(verdict("render-succeeded", any(c.is_error is False for c in runs["render_launcher.py"]),
-                               "at least one render call returned without a tool error"))
+        results.append(verdict("render-succeeded", any(c.is_error is False or RENDERED.search(c.result)
+                                                       for c in runs["render_launcher.py"]),
+                               "at least one render call returned without a tool error or printed `rendered <path>`"))
         results.extend(check_launcher(context.repo, context.work))
 
     timeouts = [c.text[:80] for c in transcript.calls if c.is_error and TOOL_TIMEOUT.search(c.result)]
@@ -998,4 +1075,12 @@ def reference_contract(draft: dict, fixture: str) -> dict:
         })
     else:
         contract["status"] = "validated"
+        _contract_lib().stamp_promotion(contract)   # as --promote leaves it
     return contract
+
+
+def _contract_lib():
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    import contract_lib
+    return contract_lib

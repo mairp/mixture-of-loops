@@ -20,9 +20,14 @@ of the command, and a wrapper is where they get lost. In a notebook-style harnes
 means a shell cell (`%%bash`) or a `!` line, not `subprocess.run`.
 
 Work inside the repository and `SKILL_ROOT` only. Do not list or read parent directories,
-sibling directories or the wider filesystem, and do not search for `specstride` or other
-tooling: whether it is installed is the launcher's `--dry-run` job to report (step 9), not
-yours to discover.
+sibling directories, your home directory or the wider filesystem, and do not search for
+`specstride` or other tooling (`which`, `command -v`, `type`, a `PATH` directory's
+listing), run it (`specstride --help`), or read its executable: whether it is installed is
+the launcher's `--dry-run` job to report (step 9), and the options it takes are the ones
+[references/derivation.md](references/derivation.md) lists. `SKILL_ROOT` is the directory as
+you reached it; do not follow a symlink out of it to list what surrounds its target. Git
+configuration outside the repository (`~/.gitconfig`, `~/.config/git/`,
+`core.excludesFile`, `git config --global`) is out of scope too.
 
 ## Inputs and output
 
@@ -98,19 +103,28 @@ an existing root-level launcher, which keeps working unchanged.
 1. Read [references/derivation.md](references/derivation.md). Inventory all supplied
    feature artifacts and relevant repository instructions before deriving stages.
 2. Before writing any artifact, make a Git repository ignore `.mixture-of-loops/`, so the
-   first `git status` after generation stays clean. Append the rule once, idempotently,
+   first `git status` after generation shows the contract and its verification plan and
+   nothing else. Append the rule once, idempotently,
    and say which file received it. Use the repository's `.gitignore` by default and
-   `.git/info/exclude` when the user prefers to leave shared files untouched:
+   `.git/info/exclude` when the user prefers to leave shared files untouched. Read and
+   write only those two files: never the global excludes file or any git config outside
+   the repository, even to check whether a rule already exists there:
 
    ```text
-   .mixture-of-loops/*
-   !.mixture-of-loops/*/
+   .mixture-of-loops/**
+   !.mixture-of-loops/**/
    !.mixture-of-loops/**/launch-contract.json
+   !.mixture-of-loops/**/verification-commands.json
+   .mixture-of-loops/**/generated/
+   .mixture-of-loops/**/runs/
    ```
 
-   These negations keep the contract committable, since Git does not descend into a
-   wholly ignored directory. Offer plain `.mixture-of-loops/` when the user wants the
-   contract ignored too.
+   The negations keep the contract and the verification plan committable, since Git does
+   not descend into a wholly ignored directory; the last two lines keep the renderer's
+   bundles (which carry a copy of the contract) and run state ignored at any depth. Offer
+   plain `.mixture-of-loops/` when the user wants the contract ignored too. The launcher,
+   its `generated/` bundle and `runs/` are ignored, not litter: never delete or move them
+   to tidy `git status`, because the launcher runs from its bundle.
 3. Bootstrap a provenance-bound draft, with the learning mode read above. This is a shell
    command line, not a call to make through a language's process API (see above):
 
@@ -129,7 +143,11 @@ an existing root-level launcher, which keeps working unchanged.
 5. Preserve declared verification commands as fixed `executable` plus `args`; never
    invent a plausible command. An absent or conflicting declaration is an explicit
    finding. Keep Specstride's verification plan separate from the launch contract and pass it
-   with `--verification-commands`.
+   with `--verification-commands`. Write it beside the contract, as
+   `.mixture-of-loops/<feature>/verification-commands.json`, never under `generated/` or
+   `runs/`, which the renderer and the runtime own. Its shape is fixed (references/contract.md, "Verification
+   plan"): an object with a `commands` array whose entries carry `id`, `phase`,
+   `executable`, `args`, an absolute `cwd` and `timeoutSec`.
 6. Classify prerequisites by producer and earliest valid check. A future stage output is
    not a preflight input. Existing authorization may be consumed within its scope;
    missing non-delegable authority blocks before the affected model run. Never fabricate
@@ -142,10 +160,23 @@ an existing root-level launcher, which keeps working unchanged.
    an open `blocker` finding whose `source` is the prerequisite's own line, and it stops
    derivation at a draft: a runtime precondition check on the same path does not resolve
    it, because the authority must exist before the pipeline is derived, not before it
-   runs.
+   runs. A `present` one is consumed within its scope: give it a precondition on its path
+   at the earliest stage that needs it. Strict validation refuses a present prerequisite
+   no stage checks.
+
+   `file_exists` is for a file. For a directory, Specstride's feature state directory
+   `.specstride/features/<slug>` included, use `dir_exists`; validation refuses
+   `file_exists` on either.
 7. Make stage order explicit and serial unless actual interfaces and shared-state rules
    prove concurrency safe. Use argv arrays and environment references, never shell
    strings, `eval`, `sh -c`, or blanket answers to prompts.
+
+   An implementation obligation (every task the bootstrap inventoried starts as one) maps
+   to a `specstride` stage: implementing it is Specstride's loop, not yours. Never write
+   the implementation yourself, neither into the repository nor into a stage's argv
+   (`python3 -c "open('src/x.py','w').write(...)"`): `setup` stages are for declared,
+   idempotent environment setup and `command` stages for declared verification. Strict
+   validation refuses a mapped implementation obligation with no `specstride` stage.
 8. Validate, then render. Same rule as step 3 — a shell command line, not a subprocess call:
 
    ```text
@@ -154,8 +185,11 @@ an existing root-level launcher, which keeps working unchanged.
      --contract LAUNCH_CONTRACT --output RUN_SCRIPT
    ```
 
-   Never write `status` yourself: the bootstrap writes `draft`, and only `--promote`
-   writes `validated`, and only when the strict check passes. While any `blocker` finding
+   Never write `status` yourself, and never write a contract from scratch: derive from the
+   bootstrap's draft. The bootstrap writes `draft`, and only `--promote` writes `validated`,
+   and only when the strict check passes. It stamps what it validated, and the renderer
+   refuses `validated` without that stamp or after any later edit: promote after every
+   change, and render only after it exits 0. While any `blocker` finding
    is `open`, `--promote` exits 20, leaves (or sets) `draft`, and prints each blocker. A
    `next:` line names work the draft still owes (derivation not done, or an absent
    prerequisite with no blocker at its line): do it, then promote again. Without `next:`
@@ -171,8 +205,12 @@ an existing root-level launcher, which keeps working unchanged.
    ```
 
    Dry-run is read-only and takes precedence over `--implement` and `--smoke` in every
-   argument order. Run further stubbed checks when the generated setup, decision, or
-   recovery logic warrants them. In `generate` this is where the work ends; say so, and
+   argument order. Its `[PREFLIGHT]` lines say whether each preflight check holds on this
+   host, `command available: specstride` included: that is the answer to whether
+   Specstride is installed, so report it from there and never probe for it yourself. A
+   `fail` there is not a generation failure; the live run blocks on it (exit 21). Run
+   further stubbed checks when the generated setup, decision, or recovery logic warrants
+   them: running the launcher against stubbed stage commands, never inspecting the host. In `generate` this is where the work ends; say so, and
    offer `run`. In `auto` the generated artifacts are complete at this point: go straight
    to step 11 with the path you just rendered. Do not revisit steps 1-8, and do not
    re-check the ignore rule, the contract or the launcher again — the gate in step 11
@@ -225,7 +263,8 @@ or tool name.
     This gates, starts the launcher detached, and reports until the run is terminal. A
     harness with a scheduling primitive may instead run `launch` once and `observe` at each
     wake-up; the messages are identical either way, and `observe` prints the delay to wait
-    before the next one. To end a run the user asked to end, use `stop --launcher
+    before the next one. The launcher runs detached, so a shell tool that kills a
+    long-running command (a per-call timeout) stops only the reporting, never the run. To end a run the user asked to end, use `stop --launcher
     RUN_SCRIPT`, or the `kill -TERM -<pgid>` the launch message prints.
 
 13. Relay the `[MOL-*]` lines as they are printed, and add nothing to them. Report the
@@ -234,7 +273,17 @@ or tool name.
     Every one of those lines is also appended to `runs/<id>/harness-report.log`. If the
     harness moves a long-running supervision command to the background, truncates its
     output, or loses the stream some other way, read that file and relay the lines from
-    there rather than describing the run in your own words.
+    there rather than describing the run in your own words. If the command was cut short
+    (a tool timeout, a signal) before a `[MOL-DIGEST]` line, nothing has reported the end
+    of the run yet: run
+
+    ```text
+    python3 SKILL_ROOT/scripts/supervise.py observe --launcher RUN_SCRIPT
+    ```
+
+    and repeat it, waiting the delay it prints, until it prints the `[MOL-DIGEST]` line.
+    Each call returns at once. Never read `state.json` or the launcher's logs and report
+    the outcome yourself: the digest is the report.
 
 ### Launch discipline
 

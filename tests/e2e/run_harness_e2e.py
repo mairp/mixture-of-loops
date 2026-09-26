@@ -171,7 +171,8 @@ PROMPTS = {
 # A run that is asked to execute gets the pipeline-acting stub instead of the refusing
 # one, in sleep mode so an intermediate running state is there to be observed.
 EXECUTION_STUB_ENV = {"MOL_EXEC_STUB_MODE": "sleep", "MOL_EXEC_STUB_SLEEP": "5",
-                      "MOL_EXEC_STUB_FEATURE": "001-greeting"}
+                      "MOL_EXEC_STUB_FEATURE": "001-greeting",
+                      "MOL_EXEC_STUB_IMPLEMENTATION": str(mol_e2e.IMPLEMENTATION)}
 # ── the budget ────────────────────────────────────────────────────────────────
 # Wall-clock seconds per run, by harness, model class (local, gpt-5 or Compass) and run kind:
 # `auto` does strictly more than deriving (it also runs the pipeline and supervises it
@@ -288,9 +289,14 @@ def archive(root: Path, dest: Path, *, keep: bool = False) -> None:
 
 
 def base_environment(home: Path, tmp: Path, token: str) -> dict[str, str]:
-    """A clean environment: no inherited keys, tokens, or harness configuration."""
+    """A clean environment: no inherited keys, tokens, or harness configuration.
+
+    Also puts the stub back in front of PATH for login shells: codex runs every command
+    through `bash -lc`, and /etc/profile resets PATH, so without the run home's own
+    .bash_profile the launcher's `command -v specstride` found no specstride at all."""
     keep = {key: os.environ[key] for key in ("LANG", "LC_ALL", "USER", "LOGNAME", "SHELL") if key in os.environ}
     stub = home.parent / "stub-bin"
+    (home / ".bash_profile").write_text(f'PATH="{stub}:$PATH"\nexport PATH\n', encoding="utf-8")
     return {**keep, "PATH": f"{stub}:{os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
             "HOME": str(home), "TMPDIR": str(tmp), "TERM": "dumb", "NO_COLOR": "1",
             "PYTHONDONTWRITEBYTECODE": "1", "MOL_E2E_RUN": token}
@@ -701,8 +707,13 @@ class Codex(Harness):
         codex_home.mkdir()
         binding = provider_binding(self.models_json, "litellm", self.model.id)
         key = resolve_key_reference(binding.get("apiKey", "")) or ""
+        catalog = codex_model_catalog(self.model.id)
+        if catalog is not None:
+            (codex_home / "model-catalog.json").write_text(json.dumps(catalog, indent=2), encoding="utf-8")
         (codex_home / "config.toml").write_text(
-            f'model = "{self.model.id}"\nmodel_provider = "mol-litellm"\n\n[model_providers.mol-litellm]\n'
+            f'model = "{self.model.id}"\nmodel_provider = "mol-litellm"\n'
+            + (f'model_catalog_json = "{codex_home / "model-catalog.json"}"\n' if catalog is not None else "")
+            + '\n[model_providers.mol-litellm]\n'
             f'name = "LiteLLM"\nbase_url = "{LITELLM}/v1"\nenv_key = "MOL_LITELLM_KEY"\n'
             'wire_api = "responses"\n', encoding="utf-8")
         environment = {**base_environment(home, tmp, token), "CODEX_HOME": str(codex_home), "MOL_LITELLM_KEY": key}
@@ -710,6 +721,38 @@ class Codex(Harness):
                 "-m", self.model.id, prompt]
         return Prepared(argv, environment, f"codex -> LiteLLM responses -> {self.model.id}", [key] if key else [],
                         onboard("codex", repo, environment))
+
+
+CODEX_MODELS_CACHE = Path("/root/.codex/models_cache.json")
+
+
+def codex_model_catalog(model_id: str, cache: Path = CODEX_MODELS_CACHE) -> dict | None:
+    """A model_catalog_json for Codex that knows `model_id`, or None to leave Codex alone.
+
+    Codex ships metadata only for the models its own backend lists. Without an entry,
+    `codex exec -m gpt-5` warns "Model metadata for `gpt-5` not found. Defaulting to
+    fallback metadata" and offers a shell tool gpt-5 was not trained on: in the
+    2026-09-23 grid it wrapped every command in a second `bash -lc` and leaked
+    exec_command's `max_output_tokens` into the command text, and 20-40% of its calls
+    failed on the quoting. The entry comes from the host's own Codex models cache: the
+    model itself if listed, else the shortest-named model of the same family (gpt-5.5 for
+    gpt-5), renamed. LiteLLM's gpt-5 route rejects the `tool_search` tool, so the search
+    tool is off. Only gpt-* models get one: the local-model runs never had the warning
+    turned into failures, and their recorded budgets assume Codex as it was.
+    """
+    if not model_id.startswith("gpt-"):
+        return None
+    try:
+        models = json.loads(cache.read_text(encoding="utf-8"))["models"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    exact = [m for m in models if isinstance(m, dict) and m.get("slug") == model_id]
+    family = sorted((m for m in models if isinstance(m, dict) and str(m.get("slug", "")).startswith(model_id + ".")),
+                    key=lambda m: (len(m["slug"]), m["slug"]))
+    if not exact and not family:
+        return None
+    entry = dict((exact or family)[0], slug=model_id, display_name=model_id, supports_search_tool=False)
+    return {"models": [entry]}
 
 
 DSH_HOME_REAL = Path("/root/.dsh")
@@ -983,7 +1026,7 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
                                      expect_execution=mode == "auto", work=root, root=root,
                                      grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
                                                    "mol_e2e", "expectations/greeting", "reference_contract",
-                                                   "summary.json", "report.json", "home-snapshot", str(evidence),
+                                                   "summary.json", "report.json", "home-snapshot", "stub-bin/", "stub-specstride.jsonl", str(evidence),
                                                    *[str(evidence / other) for other in os.listdir(evidence)
                                                      if other != run_id],
                                                    *other_roots])
@@ -1003,6 +1046,7 @@ def run_one(harness: Harness, mode: str, fixture: str, evidence: Path, timeout: 
                                   "text": c.text[:400]} for c in transcript.calls]
         summary["stop_reason"] = transcript.stop_reason
         summary["error_message"] = transcript.error_message
+        summary["home_changes"] = home_changes   # all of them: the verdict detail keeps five
         summary["verdicts"] = verdicts
         summary["status"] = mol_e2e.summarize(verdicts)
         redaction = redact(root, prepared.secrets)
@@ -1178,6 +1222,21 @@ def print_report(report: dict, color: bool) -> None:
               f"differing={row['differing'] or 'none'}")
 
 
+def refiltered_home_verdict(carried: dict, summary: dict) -> dict:
+    """real-homes-unchanged with home_snapshot.diff's current host-noise filters applied to
+    the changes the live run recorded: the full list where summary.json kept one, else the
+    verdict's own detail, which is complete only below the five entries it shows. Nothing
+    is re-observed; a filter added later can only drop what the host itself wrote."""
+    changes = summary.get("home_changes")
+    if changes is None:
+        shown = [part for part in carried.get("detail", "").split("; ") if part]
+        if len(shown) >= 5 or carried.get("status") != "fail":
+            return carried
+        changes = shown
+    kept = [line for line in changes if not home_snapshot.host_noise(line.split(maxsplit=1)[-1].split(" (")[0])]
+    return {**carried, "status": "fail" if kept else "pass", "detail": "; ".join(kept[:5])}
+
+
 def reevaluate(evidence: Path) -> int:
     """Recompute verdicts from a saved transcript and repository. Facts that only the live
     run could observe (timeout, exit status, reaped processes, home and checkout snapshots,
@@ -1229,13 +1288,14 @@ def reevaluate(evidence: Path) -> int:
                                          work=root, root=worked,
                                          grader_paths=[str(ROOT / "tests"), str(ROOT / "bin"), str(ROOT / "skills"),
                                                        "mol_e2e", "expectations/greeting", "reference_contract",
-                                                       "summary.json", "report.json", "home-snapshot",
+                                                       "summary.json", "report.json", "home-snapshot", "stub-bin/", "stub-specstride.jsonl",
                                                        # before #26 a run worked inside the evidence
                                                        # directory, so every call named it
                                                        *([] if evidence.resolve() in worked.resolve().parents
                                                          else [str(evidence)]),
                                                        *[str(evidence / o) for o in os.listdir(evidence) if o != run.name]])
-            verdicts = mol_e2e.evaluate(context) + [v for v in old["verdicts"] if v["name"] in carried]
+            verdicts = mol_e2e.evaluate(context) + [refiltered_home_verdict(v, old) if v["name"] == "real-homes-unchanged"
+                                                    else v for v in old["verdicts"] if v["name"] in carried]
             changed = {v["name"]: v["status"] for v in verdicts} != {v["name"]: v["status"] for v in old["verdicts"]}
             new = {**old, "verdicts": verdicts, "status": mol_e2e.summarize(verdicts), "reevaluated": True,
                    "original_status": old["status"],

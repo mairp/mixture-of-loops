@@ -38,6 +38,10 @@ CHECKS = {
     "json_field_equals",
 }
 DISPOSITIONS = {"mapped", "optional", "out-of-scope", "unresolved", "unsupported"}
+# The bootstrap's producer placeholder: like an unresolved disposition, only a draft keeps it.
+# Other producers stay the model's words (references/derivation.md's Producer axis), except
+# that a `stage:<id>` must name a stage.
+UNCLASSIFIED_PRODUCER = "unclassified"
 # The optional harness-side `configuration.auto` budget: how often a supervising harness
 # may relaunch the launcher after a classified transient stage failure, and the wall clock
 # that supervision may span. Both are bounded by what the stages themselves declare, so a
@@ -68,6 +72,13 @@ SENSITIVE_ENV = re.compile(r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY
 # reminder on stderr, never a failure: see warn_if_not_shell_invoked.
 SHELL_MARKER_ENV = "MOL_VIA"
 SHELL_MARKER_VALUE = "shell"
+
+
+# The run_stop.reason values Specstride writes with exit 4 that a relaunch can help
+# (/root/specstride orchestrator.sh, checked 2026-09-25; references/derivation.md has the
+# full exit-4 table). A model left to find them searched the host for Specstride's source
+# (2026-09-25 qwen claude-explicit); an invented one would never match a real stop.
+RETRYABLE_STOP_REASONS = ("wall_budget", "proposer_consecutive_errors")
 
 
 class ContractError(Exception):
@@ -138,6 +149,102 @@ def _is_learning_state(path: Path) -> bool:
     return False
 
 
+def _is_feature_state_dir(path: Path) -> bool:
+    """True for Specstride's per-feature state directory, `<state dir>/features/<slug>`,
+    whether or not it exists yet: a stage's postcondition often names it before the run."""
+    parts = path.parts
+    return len(parts) >= 3 and parts[-3] in (STATE_DIRNAME, LEGACY_STATE_DIRNAME) and parts[-2] == "features"
+
+
+def _unchecked_prerequisites(contract: dict, root: Path) -> list[str]:
+    """Inventoried prerequisites that exist but that no stage precondition checks and no
+    settled finding at their own line explains.
+
+    A present file passes today; a precondition is what keeps a later run honest if it
+    goes away. This was a warning, and gpt-5 promoted past it twice (2026-09-24 codex-auto,
+    prime-auto): the release approval was consumed by no stage. A prerequisite that truly
+    gates nothing is recorded as a resolved or accepted finding at its own source line."""
+    checked: set[Path] = set()
+    for stage in contract.get("stages") or []:
+        if not isinstance(stage, dict):
+            continue
+        cwd = resolve_path(stage["cwd"], root) if isinstance(stage.get("cwd"), str) else root
+        for check in stage.get("preconditions") or []:
+            if isinstance(check, dict) and isinstance(check.get("path"), str):
+                checked.add(resolve_path(check["path"], cwd))
+    settled = {(source.get("path"), source.get("line"))
+               for finding in contract.get("findings") or []
+               if isinstance(finding, dict) and finding.get("status") in ("resolved", "accepted")
+               and isinstance(source := finding.get("source"), dict)}
+    problems = []
+    for entry in (contract.get("inventory") or {}).get("prerequisites") or []:
+        if not isinstance(entry, dict) or entry.get("present") is not True:
+            continue
+        written = entry.get("resolved") or entry.get("path")
+        if not isinstance(written, str) or resolve_path(written, root) in checked:
+            continue
+        source = entry.get("source") if isinstance(entry.get("source"), dict) else {}
+        if (source.get("path"), source.get("line")) in settled:
+            continue
+        problems.append(f"{entry.get('id') or 'a prerequisite'} names `{entry.get('path')}`, which exists, but no "
+                        "stage precondition checks it: put a file_exists precondition on it at the earliest stage "
+                        "that needs it (if it gates nothing, record why as an accepted finding at "
+                        f"{source.get('path')}:{source.get('line')})")
+    return problems
+
+
+def verification_plan_problems(path: Path) -> list[str]:
+    """What Specstride's load_declared_commands would refuse in a --verification-commands
+    document, short of resolving executables on PATH: an object whose non-empty `commands`
+    holds entries with a unique `id`, a positive `phase`, `executable`, string `args`, an
+    absolute existing `cwd` and a positive `timeoutSec`. A bare list with `cwd: "."`
+    validated and dry-ran, then stops a live launch (2026-09-25 gpt-5 pi-auto)."""
+    shape = ('write {"commands": [{"id", "phase", "executable", "args", "cwd", "timeoutSec"}]} '
+             "(references/contract.md, Verification plan)")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"is not JSON ({exc}): {shape}"]
+    if not isinstance(document, dict) or not isinstance(document.get("commands"), list) \
+            or not document["commands"]:
+        return [f"is not an object with a non-empty `commands` array: {shape}"]
+    problems, seen = [], set()
+    for index, entry in enumerate(document["commands"]):
+        where = f"commands[{index}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} must be an object")
+            continue
+        identifier = entry.get("id")
+        if not isinstance(identifier, str) or not identifier.strip():
+            problems.append(f"{where}.id must be a non-empty string")
+        elif identifier in seen:
+            problems.append(f"{where}.id {identifier!r} is a duplicate")
+        else:
+            seen.add(identifier)
+        for key in ("phase", "timeoutSec"):
+            value = entry.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                problems.append(f"{where}.{key} must be a positive integer")
+        if not isinstance(entry.get("executable"), str) or not entry["executable"]:
+            problems.append(f"{where}.executable must be a non-empty string")
+        args = entry.get("args", [])
+        if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+            problems.append(f"{where}.args must be a list of strings")
+        cwd = entry.get("cwd")
+        if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
+            problems.append(f"{where}.cwd must be an absolute path to an existing directory")
+    return problems
+
+
+def _option_values(action: object, option: str) -> list[str]:
+    """Every value an argv gives `option`, as `option VALUE` or `option=VALUE`."""
+    argv = action.get("argv") if isinstance(action, dict) else None
+    if not isinstance(argv, list):
+        return []
+    values = [argv[i + 1] for i, item in enumerate(argv[:-1]) if item == option and isinstance(argv[i + 1], str)]
+    return values + [item.split("=", 1)[1] for item in argv if isinstance(item, str) and item.startswith(option + "=")]
+
+
 def _validate_action(action: object, label: str, errors: list[str]) -> None:
     _require(isinstance(action, dict), f"{label} must be an object", errors)
     if not isinstance(action, dict):
@@ -190,6 +297,7 @@ def _validate_check(
     *,
     cwd: Path | None = None,
     roots: list[Path] | None = None,
+    postcondition: bool = False,
 ) -> None:
     _require(isinstance(check, dict), f"{label} must be an object", errors)
     if not isinstance(check, dict):
@@ -201,6 +309,13 @@ def _validate_check(
         if isinstance(check.get("path"), str) and cwd is not None and roots:
             _require(_inside(resolve_path(check["path"], cwd), roots),
                      f"{label}.path escapes authorized_roots", errors)
+    if kind == "file_exists" and isinstance(check.get("path"), str) and cwd is not None:
+        # runtime's file_exists is is_file(): on a directory it fails every run, after the
+        # stage did its work (2026-09-24 qwen claude-auto on .specstride/features/001-greeting)
+        target = resolve_path(check["path"], cwd)
+        _require(not (target.is_dir() or _is_feature_state_dir(target)),
+                 f"{label} is file_exists on `{check['path']}`, which is a directory: use dir_exists, "
+                 "or name a file inside it", errors)
     if kind in {"env_set", "command_available"}:
         _require(isinstance(check.get("name"), str), f"{label}.name is required", errors)
     if kind == "command_success":
@@ -215,6 +330,11 @@ def _validate_check(
         _require("value" in check, f"{label}.value is required", errors)
     _require(check.get("timing", "stage") in {"preflight", "stage"},
              f"{label}.timing must be preflight or stage", errors)
+    # Preflight reads preconditions only: a postcondition marked preflight would never be
+    # checked before the run, so a gate written that way silently gates nothing.
+    _require(not (postcondition and check.get("timing") == "preflight"),
+             f"{label}.timing preflight applies to preconditions only; move this check to "
+             "preconditions to gate the run on it", errors)
 
 
 def check_source_hashes(contract: dict) -> list[str]:
@@ -549,6 +669,14 @@ def validate_contract(
     _require(status in {"draft", "validated"}, "status must be draft or validated", errors)
     if not allow_draft:
         _require(status == "validated", "contract status must be validated", errors)
+        # The bootstrap's provenance: sources, inventory and coverage come from reading the
+        # artifacts, not from the model's memory of them (2026-09-24 gpt-5 prime-auto wrote
+        # the whole contract by hand and skipped the bootstrap).
+        generated = contract.get("generated_by")
+        _require(isinstance(generated, dict) and isinstance(generated.get("tool"), str)
+                 and isinstance(contract.get("inventory"), dict),
+                 "the contract was not started by bootstrap_contract.py (no generated_by or inventory): "
+                 "bootstrap a draft (SKILL.md step 3) and derive from it, never write one by hand", errors)
 
     repository = contract.get("repository")
     _require(isinstance(repository, dict), "repository must be an object", errors)
@@ -604,6 +732,8 @@ def validate_contract(
         _require(isinstance(stages, list) and bool(stages), "validated contract needs stages", errors)
     stage_ids: set[str] = set()
     ordered_ids: list[str] = []
+    stage_kinds = ({stage.get("id"): stage.get("kind") for stage in stages if isinstance(stage, dict)}
+                   if isinstance(stages, list) else {})
     if isinstance(stages, list):
         for index, stage in enumerate(stages):
             label = f"stages[{index}]"
@@ -628,6 +758,19 @@ def validate_contract(
                          f"{label}.cwd escapes authorized_roots", errors)
             stage_cwd = resolve_path(cwd, root) if isinstance(cwd, str) else root
             _validate_action(stage.get("action"), f"{label}.action", errors)
+            if not allow_draft:
+                # SKILL.md step 5: the verification plan is a file the derivation writes; a
+                # stage that names one it never wrote validates and dry-runs, then fails live.
+                # specstride resolves a relative one from where it is launched: the stage cwd.
+                for plan in _option_values(stage.get("action"), "--verification-commands"):
+                    path = resolve_path(plan, stage_cwd)
+                    exists = path.is_file() and path.stat().st_size > 0
+                    _require(exists,
+                             f"{label}.action passes --verification-commands {plan}, which does not exist or is "
+                             f"empty at {path}: write it (SKILL.md step 5) or drop the option", errors)
+                    if exists:
+                        errors.extend(f"{label}.action --verification-commands {plan}: {problem}"
+                                      for problem in verification_plan_problems(path))
             if "resume" in stage:
                 _validate_action(stage.get("resume"), f"{label}.resume", errors)
             for field in ("preconditions", "postconditions"):
@@ -641,6 +784,7 @@ def validate_contract(
                             errors,
                             cwd=stage_cwd,
                             roots=roots,
+                            postcondition=field == "postconditions",
                         )
             _require(bool(stage.get("postconditions")),
                      f"{label}.postconditions must support resume revalidation", errors)
@@ -683,6 +827,13 @@ def validate_contract(
                         _require(isinstance(reason.get("allowed"), list) and bool(reason.get("allowed"))
                                  and all(isinstance(item, str) for item in reason.get("allowed", [])),
                                  f"{label}.recovery.reason.allowed must be a nonempty string array", errors)
+                        if stage.get("kind") == CURRENT_KIND and isinstance(reason.get("allowed"), list):
+                            unknown = [item for item in reason["allowed"]
+                                       if isinstance(item, str) and item not in RETRYABLE_STOP_REASONS]
+                            _require(not unknown,
+                                     f"{label}.recovery.reason.allowed names {', '.join(map(repr, unknown))}, which "
+                                     f"Specstride never stops a retryable run with: use "
+                                     f"{' or '.join(RETRYABLE_STOP_REASONS)} (references/derivation.md)", errors)
                         if isinstance(reason.get("jsonl"), str) and roots:
                             _require(_inside(resolve_path(reason["jsonl"], stage_cwd), roots),
                                      f"{label}.recovery.reason.jsonl escapes authorized_roots", errors)
@@ -717,6 +868,20 @@ def validate_contract(
             if not allow_draft:
                 _require(entry.get("disposition") not in {"unresolved", "unsupported"},
                          f"{label} remains {entry.get('disposition')}", errors)
+                producer = entry.get("producer")
+                _require(producer != UNCLASSIFIED_PRODUCER,
+                         f"{label}.producer is still the bootstrap's `unclassified`: name what produces it "
+                         "(stage:<id> for a pending task)", errors)
+                if isinstance(producer, str) and producer.startswith("stage:"):
+                    _require(producer[len("stage:"):] in stage_ids,
+                             f"{label}.producer {producer} names no stage", errors)
+                # Implementing a task is Specstride's loop: a setup or command stage that
+                # writes the code itself (2026-09-23 gpt-5 grid) is the model doing the work.
+                if entry.get("kind") == "implementation" and entry.get("disposition") == "mapped":
+                    _require(any(stage_kinds.get(stage_id) in ("specstride", LEGACY_KIND)
+                                 for stage_id in entry.get("stage_ids") or [] if isinstance(stage_id, str)),
+                             f"{label} is an implementation obligation mapped to no specstride stage: "
+                             "implementation is Specstride's job, never a setup or command stage's", errors)
             source = entry.get("source")
             _require(isinstance(source, dict) and isinstance(source.get("path"), str)
                      and isinstance(source.get("line"), int) and source.get("line", 0) > 0
@@ -766,6 +931,9 @@ def validate_contract(
             if not allow_draft and finding.get("severity") == "blocker" and finding.get("status") == "open":
                 errors.append(f"{label} is an open blocker: {finding.get('message', '')}")
 
+    if not allow_draft:
+        errors.extend(_unchecked_prerequisites(contract, root))
+
     if errors:
         raise ContractError("\n".join(errors))
     if check_sources:
@@ -782,3 +950,28 @@ def validate_contract(
 
 def canonical_bytes(contract: dict) -> bytes:
     return (json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+
+
+def promotion_digest(contract: dict) -> str:
+    """What `validate_contract.py --promote` vouches for: the contract less its status
+    and its own promotion stamp, as it sits on disk (before any in-memory normalizing)."""
+    body = {key: value for key, value in contract.items() if key not in ("status", "promotion")}
+    return hashlib.sha256(canonical_bytes(body)).hexdigest()
+
+
+def stamp_promotion(contract: dict) -> dict:
+    """Mark `contract` (in place) as promoted: what --promote writes beside `validated`."""
+    contract.pop("promotion", None)
+    contract["promotion"] = {"by": "validate_contract.py --promote", "sha256": promotion_digest(contract)}
+    return contract
+
+
+def require_promoted(contract: dict) -> None:
+    """The renderer's gate on who wrote `validated`: only --promote does, with a stamp over
+    the rest of the contract. A status typed in by hand, or an edit after promotion, renders
+    nothing (2026-09-24 gpt-5 prime-explicit set `validated` itself). Strict validation has
+    already refused a contract the bootstrap did not start."""
+    stamp = contract.get("promotion")
+    if not isinstance(stamp, dict) or stamp.get("sha256") != promotion_digest(contract):
+        raise ContractError("status validated was not written by validate_contract.py --promote, or the "
+                            "contract changed after it was: run validate_contract.py --promote again")

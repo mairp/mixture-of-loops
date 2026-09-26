@@ -36,6 +36,11 @@ Classify each obligation on separate axes:
 | Kind | `implementation`, `prerequisite`, `verification`, `decision`, `operation` |
 | Timing | `pipeline-start`, `before:<stage>`, `after:<stage>`, `release` |
 | Producer | `existing`, `stage:<id>`, `automated-policy`, `external-authority`, `unknown` |
+
+An unchecked task is work still to do: its producer is the `stage:<id>` that implements it,
+not `existing`, even when files it names are already present. The bootstrap's
+`unclassified` producer is a placeholder: strict validation refuses it, and a
+`stage:<id>` producer must name a stage.
 | Disposition | `mapped`, `optional`, `out-of-scope`, `unresolved`, `unsupported` |
 
 Every entry needs a stable ID, source path and line/anchor, rationale, enforcing stage or
@@ -71,8 +76,8 @@ declared gate.
 The installed Specstride interface checked on 2026-09-09 accepts a JSON document containing
 `commands[]` with `id`, `phase`, `executable`, `args`, `cwd`, `timeoutSec`, and optional
 `env`. It resolves bare executables, rejects missing cwd or unknown phases, and binds the
-document hash into its verification plan. Recheck `specstride run --help` when targeting a
-different installation. This evidence came from the local Specstride checkout (then still named Wiggum) at revision
+document hash into its verification plan. references/contract.md ("Verification plan")
+gives the exact shape, and strict validation refuses a plan that does not have it. This evidence came from the local Specstride checkout (then still named Wiggum) at revision
 `1e3777f3fe16d0bc6d9e0568b4b59e519e4bab9f` with verification-related working-tree
 changes, so it establishes local compatibility rather than a released-version guarantee.
 
@@ -80,11 +85,15 @@ changes, so it establishes local compatibility rather than a released-version gu
 
 Each stage declares dependencies, cwd, preconditions, one fixed-argv action, postconditions,
 evidence paths, and bounded recovery. Put a prerequisite at the earliest boundary where it
-is both needed and expected to exist. Setup stages run only with `--implement`; otherwise
+is both needed and expected to exist. Every `present` entry in `inventory.prerequisites`
+gets a precondition on its path (strict validation refuses one that has none), unless a
+`resolved` or `accepted` finding at its own line records why it gates nothing. Setup stages run only with `--implement`; otherwise
 their postconditions must already hold.
 
-Build a Specstride action using only options supported by the target installation. Current
-local support includes `--spec-format speckit-tasks`, `--feature`, `--proposer`, `--critic`,
+Build a Specstride action from these options only; this list is the supported set, so
+do not run `specstride --help`, look it up on `PATH`, or read its files to learn more
+(SKILL.md: whether it is installed is the launcher's `--dry-run` job to report):
+`--spec-format speckit-tasks`, `--feature`, `--proposer`, `--critic`,
 `--verification required`, `--verification-commands`, `--test-plan`, `--generate-tests`,
 `--telemetry`, `--loki-url`, `--otel`, `--otel-url`, `--live`, `--no-live`, and timeout/
 budget controls. `specstride resume` restores saved configuration, but persist explicit
@@ -106,7 +115,21 @@ skill's *Learning mode*): `off` by default, `suggest` when the request asks the 
 reference).
 
 Specstride exit `4` covers wall budget, iteration exhaustion, and consecutive proposer errors.
-Only retry it when the newest correlated event records an allowed `run_stop.reason`. Exit
+Only retry it when the newest correlated event records an allowed `run_stop.reason`. These
+are the exact `run_stop.reason` values Specstride writes with exit `4` (its
+`orchestrator.sh`, checked 2026-09-25), so `recovery.reason.allowed` takes its words from
+this list and nowhere else; do not search the host for Specstride's source to find them:
+
+| `run_stop.reason` | Meaning | A relaunch can help |
+| --- | --- | --- |
+| `wall_budget` | the run's wall-clock budget ran out mid-phase | yes: resume continues the phase |
+| `proposer_consecutive_errors` | the proposer failed several passes in a row (provider errors) | yes, when the errors are transient |
+| `proposer_max_iter` | the phase used every proposer iteration | no: the same budget runs out again |
+| `proposer_no_progress` | passes stopped changing anything | no |
+| `proposer_yield_budget` | a pass yielded to a long job more often than allowed | no |
+| `proposer_cap_exhausted` | passes were killed at the pass ceiling repeatedly | no |
+
+Exit `4` with any other reason, or with no correlated `run_stop`, is not retryable. Exit
 `6` is an intentional stop and must remain stopped. Exit `5` means another run owns the
 workdir and is a terminal launcher conflict.
 

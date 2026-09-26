@@ -489,6 +489,20 @@ def dry_run(contract: dict, implement: bool, smoke: bool, color: bool) -> int:
             print(f"[{label}] {text}")
 
     show("DRY-RUN", f"contract {contract['id']} is source-current; no actions or writes will occur", "green")
+    # What the live run's preflight would decide, read-only (a command_success check is not
+    # run): SKILL.md makes this the answer to "is specstride installed?", which a model
+    # otherwise probes for itself (2026-09-25 qwen prime-explicit: `command -v specstride`).
+    root = Path(contract["repository"]["root"]).resolve()
+    for stage in contract["stages"]:
+        if stage["kind"] == "smoke" and not smoke:
+            continue
+        cwd = resolve_path(stage["cwd"], root)
+        for check in stage["preconditions"]:
+            if check.get("timing", "stage") != "preflight":
+                continue
+            passed, detail = check_condition(check, cwd, execute_commands=False)
+            status = "deferred" if detail == "command check deferred" else "pass" if passed else "fail"
+            show("PREFLIGHT", f"{stage['id']}: {detail}: {status}", "green" if passed else "yellow")
     for stage in contract["stages"]:
         if stage["kind"] == "smoke" and not smoke:
             show("SKIP", f"{stage['id']} (enable with --smoke)", "yellow")

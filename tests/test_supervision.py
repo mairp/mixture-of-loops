@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 import unittest.mock
@@ -47,11 +48,13 @@ def contract_for(repository: Path, stages: list[dict], *, root: Path | None = No
         "schema_version": "1.0",
         "id": "fixture-pipeline",
         "status": "validated",
+        "generated_by": {"tool": "tests/test_supervision.py"},
+        "inventory": {},
         "repository": {"root": str(root or repository), "revision": None, "dirty": None},
         "authorized_roots": [str(path) for path in (authorized or [repository])],
         "sources": [{"path": relative, "kind": "spec", "sha256": digest(source), "lines": 1}],
         "coverage": [{"id": "OBL-1", "source": {"path": relative, "line": 1, "anchor": "T001"},
-                      "kind": "implementation", "timing": "pipeline-start",
+                      "kind": "operation", "timing": "pipeline-start",
                       "producer": f"stage:{stages[0]['id']}", "disposition": "mapped",
                       "stage_ids": [stage["id"] for stage in stages], "verification_ids": [],
                       "rationale": "fixture obligation", "evidence": ["done"]}],
@@ -69,7 +72,9 @@ def instant_stage(cwd: str = ".") -> dict:
 
 def render(contract: dict, repository: Path, name: str = "run-fixture.sh") -> Path:
     path = repository / "launch-contract.json"
-    path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+    # as validate_contract.py --promote leaves it: render_launcher.py only renders that
+    path.write_text(json.dumps(contract_lib.stamp_promotion(json.loads(json.dumps(contract))), indent=2),
+                    encoding="utf-8")
     launcher = repository / name
     result = subprocess.run(
         [sys.executable, str(SCRIPTS / "render_launcher.py"), "--contract", str(path),
@@ -277,6 +282,37 @@ class ShellMarkerReminderTests(unittest.TestCase):
             block = block.replace(placeholder, value)
         return subprocess.run(["bash", "-c", block], capture_output=True, text=True, check=False,
                               env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+
+    def test_skill_md_step_2_ignore_rule_leaves_only_the_contract_and_plan(self) -> None:
+        """2026-09-25 qwen dsh-explicit deleted its own bundle to tidy `git status`: the old
+        rule (`.mixture-of-loops/*`, `!.mixture-of-loops/*/`) ignored nothing below a
+        feature directory, so the default layout could never be clean."""
+        # as rendered: the block sits in a list item, and a leading space is part of a pattern
+        rules = textwrap.dedent(self.skill_md_block("!.mixture-of-loops/**/launch-contract.json"))
+        layouts = {
+            "feature directory": ".mixture-of-loops/001-greeting",
+            "artifact root itself": ".mixture-of-loops",
+        }
+        for name, launcher_dir in layouts.items():
+            with self.subTest(layout=name), tempfile.TemporaryDirectory() as temporary:
+                repository = Path(temporary)
+                subprocess.run(["git", "init", "-q", str(repository)], check=True)
+                (repository / ".gitignore").write_text(rules, encoding="utf-8")
+                feature = repository / ".mixture-of-loops/001-greeting"
+                artifacts = repository / launcher_dir
+                artifacts = artifacts if artifacts.name == ".mixture-of-loops" else artifacts / ".mixture-of-loops"
+                for relative in (feature / "launch-contract.json", feature / "verification-commands.json",
+                                 repository / launcher_dir / "run-001-greeting.sh",
+                                 artifacts / "generated/001-greeting/0123abcd/launch-contract.json",
+                                 artifacts / "generated/001-greeting/0123abcd/runtime.py",
+                                 artifacts / "runs/001-greeting/state.json"):
+                    relative.parent.mkdir(parents=True, exist_ok=True)
+                    relative.write_text("{}", encoding="utf-8")
+                status = subprocess.run(["git", "-C", str(repository), "status", "--porcelain", "-uall"],
+                                        capture_output=True, text=True, check=True).stdout.splitlines()
+                self.assertEqual(sorted(status), ["?? .gitignore",
+                                                  "?? .mixture-of-loops/001-greeting/launch-contract.json",
+                                                  "?? .mixture-of-loops/001-greeting/verification-commands.json"])
 
     def test_skill_md_step_3_carries_the_marker_inline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

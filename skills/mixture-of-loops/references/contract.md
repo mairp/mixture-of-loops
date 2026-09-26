@@ -12,6 +12,11 @@ The launch contract is pipeline data. It does not replace Specstride's verificat
 - `status`: `draft` or `validated`. The bootstrap writes `draft`; only
   `validate_contract.py --promote` writes `validated`, and only when strict validation
   passes. A contract with an open `blocker` finding stays `draft`.
+- `generated_by` and `inventory` (bootstrap-written): strict validation refuses a contract
+  without them, since a contract the bootstrap did not start has no provenance.
+- `promotion` (written by `--promote` only): a SHA-256 over the contract less `status` and
+  `promotion`. The renderer refuses `validated` without a matching stamp, so a status typed
+  in by hand, or an edit made after promotion, renders nothing until promoted again.
 - `repository.root`: absolute repository root used to resolve relative paths.
 - `authorized_roots`: absolute roots under which stage working directories may resolve.
 - `sources`: relative or absolute source paths with SHA-256 digests and kinds. A path
@@ -24,11 +29,36 @@ The launch contract is pipeline data. It does not replace Specstride's verificat
 - `inventory.prerequisites` (bootstrap-derived): every path a source names beside a
   `PRE-` id or under a prerequisites heading — as written, resolved against
   `repository.root`, and whether it is `present`. Existence only; what it means is a
-  finding.
+  finding. Strict validation refuses a `present` one that no stage precondition checks,
+  unless a `resolved` or `accepted` finding at its own source line records why it gates
+  nothing.
 - `stages`: dependency-ordered stage records.
 
 The renderer accepts only `validated` contracts with current source hashes and no open
 blockers. `bootstrap_contract.py` intentionally creates a draft with unresolved coverage.
+
+## Verification plan
+
+The file a `specstride` stage passes with `--verification-commands` is Specstride's own
+input, separate from the contract. It is a JSON object, never a bare list:
+
+```json
+{
+  "schema_version": "1.0",
+  "feature": "007-example",
+  "commands": [
+    {"id": "unit-tests", "phase": 2, "executable": "python3",
+     "args": ["-m", "unittest", "discover", "-s", "tests", "-v"],
+     "cwd": "/absolute/repository/root", "timeoutSec": 600}
+  ]
+}
+```
+
+Every entry needs a unique `id`, the tasks.md `phase` whose gate runs it (a positive
+integer), `executable` and `args` exactly as declared, an absolute existing `cwd`, and a
+positive `timeoutSec`; `env` is optional. A relative plan path resolves from the stage `cwd`.
+Strict validation refuses a plan that is missing, empty or not in this shape, because
+Specstride would refuse it only once the launch is live.
 
 ## Stages
 
@@ -106,7 +136,9 @@ it to a child.
 
 Supported checks are:
 
-- `file_exists` and `dir_exists` with `path`;
+- `file_exists` and `dir_exists` with `path`. `file_exists` is true for a regular file
+  only: validation refuses it on a path that is a directory now, and on Specstride's
+  per-feature state directory (`.specstride/features/<slug>`); use `dir_exists` there;
 - `env_set` with `name`;
 - `command_available` with `name`;
 - `command_success` with fixed `argv`, optional `cwd`, `env`, and `timeout_seconds`;
