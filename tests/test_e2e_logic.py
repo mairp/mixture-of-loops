@@ -9,8 +9,11 @@ blocked-outcome variants.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -327,6 +330,68 @@ class E2ELogicTests(unittest.TestCase):
                           ("compass", "compass"), "compass-opus-high", "claude-opus-4.8"))
         self.assertEqual(run_harness_e2e.EXPLICIT["dsh"], "/mixture-of-loops")
         self.assertEqual(set(run_harness_e2e.HARNESS_NAMES), set(run_harness_e2e.make_harnesses(qwen)))
+
+    def test_budget_follows_the_recorded_wall_clock(self) -> None:
+        budget = run_harness_e2e.run_budget
+        qwen, compass = run_harness_e2e.Model("qwen3.8-27b-q5"), run_harness_e2e.Model("compass")
+        seconds = {(h, m): budget(h, qwen, m)[0] for h in run_harness_e2e.HARNESS_NAMES for m in ("explicit", "auto")}
+        self.assertEqual(seconds, {("pi", "explicit"): 1200, ("pi", "auto"): 1800,
+                                   ("prime", "explicit"): 1200, ("prime", "auto"): 1800,
+                                   ("codex", "explicit"): 1200, ("codex", "auto"): 1800,
+                                   ("claude", "explicit"): 2700, ("claude", "auto"): 2700,
+                                   ("dsh", "explicit"): 1500, ("dsh", "auto"): 1800})
+        self.assertEqual(budget("claude", qwen, "implicit"), budget("claude", qwen, "explicit"))
+        # every recorded run fits with the margin, in whole 5-minute steps
+        for (harness, auto), recorded in run_harness_e2e.RECORDED_SECONDS.items():
+            chosen = budget(harness, qwen, "auto" if auto else "explicit")[0]
+            self.assertGreaterEqual(chosen, recorded * run_harness_e2e.BUDGET_MARGIN, harness)
+            self.assertEqual(chosen % 300, 0, harness)
+        # the 2026-09-23 Claude Code cell was killed at 1200.2 s; 2026-09-20 auto took 1776 of 1800
+        self.assertGreater(budget("claude", qwen, "explicit")[0], 1776 * 1.5)
+        # no Compass run is on record, so it keeps the flat defaults
+        self.assertEqual([budget(h, compass, m)[0] for h in run_harness_e2e.HARNESS_NAMES for m in ("explicit", "auto")],
+                         [1200, 1800] * len(run_harness_e2e.HARNESS_NAMES))
+        self.assertIn("no recorded claude run on Compass", budget("claude", compass, "explicit")[1])
+        self.assertEqual(budget("claude", qwen, "auto", 900), (900, "--timeout"))
+
+    def test_the_runner_prints_the_budget_it_chose(self) -> None:
+        runner = Path(run_harness_e2e.__file__)
+        environment = {k: v for k, v in os.environ.items() if k != "MOL_LIVE_E2E"}
+        with tempfile.TemporaryDirectory() as evidence:
+            for extra, expected in (([], ["budget claude explicit -> qwen3.8-27b-q5: 2700s (1.5x the 1776 s recorded",
+                                          "budget claude auto -> qwen3.8-27b-q5: 2700s"]),
+                                    (["--timeout", "900", "--model", "compass"],
+                                     ["budget claude explicit -> claude-opus-4.8: 900s (--timeout)"])):
+                result = subprocess.run([sys.executable, str(runner), "--skip-tiers", "--harness", "claude",
+                                         "--mode", "all", "--fixture", "blocked", "--evidence-dir", evidence, *extra],
+                                        env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                        check=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for line in expected:
+                    self.assertIn(line, result.stderr)
+
+    def test_a_timed_out_run_reports_its_budget(self) -> None:
+        run = {"harness": "claude", "mode": "explicit", "fixture": "greeting-blocked", "status": "fail",
+               "duration_seconds": 2700.3, "timed_out": True, "timeout_seconds": 2700,
+               "verdicts": [{"name": "terminal-state", "status": "fail"}]}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            run_harness_e2e.print_report({"evidence_dir": "/e", "tiers": [], "runs": [run]}, False)
+        self.assertIn("failed: terminal-state (hit the 2700 s budget)", out.getvalue())
+
+    def test_claude_code_output_reserve_follows_bebop(self) -> None:
+        qwen, compass = run_harness_e2e.Model("qwen3.8-27b-q5"), run_harness_e2e.Model("compass")
+        self.assertEqual((run_harness_e2e.claude_max_output(qwen), run_harness_e2e.claude_max_output(compass)),
+                         ("8192", "32000"))
+        bebop = Path("/root/gpu_rtx_3090/bebop.sh")
+        if not os.access(bebop, os.R_OK):   # CI runs as a user who cannot even stat /root
+            self.skipTest("bebop.sh is not readable on this host")
+        # the launcher's own function, not a copy of its numbers (thinking is off in every campaign)
+        for model in (qwen, compass):
+            result = subprocess.run(["bash", "-c", 'eval "$(sed -n "/^_bebop_max_output() {/,/^}/p" "$1")"; '
+                                     'unset BEBOP_MAX_OUTPUT; _bebop_max_output "$2"', "-", str(bebop), model.claude],
+                                    capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
+            self.assertEqual(result.stdout, run_harness_e2e.claude_max_output(model), result.stderr)
 
     def test_dsh_settings_keep_one_provider_bound_to_one_model(self) -> None:
         settings = run_harness_e2e.dsh_settings(DSH_SETTINGS, "local-high", "qwen3.8-27b-q5")
