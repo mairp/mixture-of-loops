@@ -30,6 +30,34 @@ def write_status(path: Path, contract: dict, status: str) -> None:
     os.replace(handle.name, path)
 
 
+def derivation_hints(contract: dict) -> list[str]:
+    """What the draft itself says is still undone, for a strict check that failed.
+
+    A refusal on the bootstrap's own placeholder is not the blocked outcome: derivation
+    has not happened yet. And an absent prerequisite the bootstrap inventoried, with no
+    open blocker at its own line, is a decision still to be written down. Existence is
+    the bootstrap's fact; whether the item is non-delegable authority stays the model's.
+    """
+    findings = [f for f in contract.get("findings", []) if isinstance(f, dict)]
+    open_blockers = [f for f in findings if f.get("severity") == "blocker" and f.get("status") == "open"]
+    hints = []
+    if any(f.get("id") == "semantic-derivation-required" for f in open_blockers):
+        hints.append("the bootstrap placeholder `semantic-derivation-required` is still open: derivation "
+                     "(SKILL.md steps 4-7) is not done, so this refusal is not yet a blocked outcome")
+    anchored = {(src.get("path"), src.get("line")) for f in open_blockers
+                if isinstance(src := f.get("source"), dict)}
+    for entry in (contract.get("inventory") or {}).get("prerequisites", []):
+        if not isinstance(entry, dict) or entry.get("present") is not False:
+            continue
+        source = entry.get("source") or {}
+        where = (source.get("path"), source.get("line"))
+        if where not in anchored:
+            hints.append(f"{entry.get('id') or 'a prerequisite'} names `{entry.get('path')}`, which is absent "
+                         f"({where[0]}:{where[1]}), and no open blocker has that source: if it is a "
+                         "non-delegable authority, record it there (SKILL.md step 6)")
+    return hints
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("contract")
@@ -43,6 +71,7 @@ def main() -> int:
     if args.promote and args.allow_draft:
         parser.error("--promote and --allow-draft are exclusive: promotion is the strict check")
     path = Path(args.contract)
+    original: dict = {}  # an unreadable contract owes nothing we can name
     try:
         original = load_contract(args.contract)
         contract = copy.deepcopy(original)
@@ -61,6 +90,8 @@ def main() -> int:
             write_status(path, original, "draft")
             print("status set back to draft: the contract does not pass strict validation", file=sys.stderr)
         print(f"invalid launch contract:\n{exc}", file=sys.stderr)
+        for hint in derivation_hints(original):
+            print(f"next: {hint}", file=sys.stderr)
         return 20
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
