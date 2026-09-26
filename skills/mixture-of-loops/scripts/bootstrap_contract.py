@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from contract_lib import learning_effective, learning_prefix, state_dirname  # noqa: E402
+from contract_lib import learning_effective, learning_prefix, state_dirname, warn_if_not_shell_invoked  # noqa: E402
 
 
 ARTIFACTS = (
@@ -416,6 +416,7 @@ def main() -> int:
     parser.add_argument("--learning-mode", default="off", choices=("off", "suggest", "apply"),
                         help="the SPECSTRIDE_LEARNING every specstride stage will declare (default: off)")
     args = parser.parse_args()
+    warn_if_not_shell_invoked("bootstrap_contract.py")
     root = Path(args.repo).resolve()
     if not root.is_dir():
         parser.error(f"repository is not a directory: {root}")

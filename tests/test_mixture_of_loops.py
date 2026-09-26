@@ -22,6 +22,7 @@ def digest(path: Path) -> str:
 def run(*args: object, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["MOL_VIA"] = "shell"  # this helper reproduces a shell invocation exactly
     return subprocess.run(
         [str(item) for item in args],
         cwd=cwd,
@@ -453,6 +454,7 @@ class MixtureOfLoopsTests(unittest.TestCase):
         environment = dict(os.environ)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PATH"] = f"{bin_dir}:{environment.get('PATH', '/usr/bin:/bin')}"
+        environment["MOL_VIA"] = "shell"  # this helper reproduces a shell invocation exactly
         return contract, environment
 
     def _run_env(self, environment: dict[str, str], *args: object, cwd: Path) -> subprocess.CompletedProcess[str]:

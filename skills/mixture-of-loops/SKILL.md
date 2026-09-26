@@ -111,10 +111,11 @@ an existing root-level launcher, which keeps working unchanged.
    These negations keep the contract committable, since Git does not descend into a
    wholly ignored directory. Offer plain `.mixture-of-loops/` when the user wants the
    contract ignored too.
-3. Bootstrap a provenance-bound draft, with the learning mode read above:
+3. Bootstrap a provenance-bound draft, with the learning mode read above. This is a shell
+   command line, not a call to make through a language's process API (see above):
 
    ```text
-   python3 SKILL_ROOT/scripts/bootstrap_contract.py \
+   MOL_VIA=shell python3 SKILL_ROOT/scripts/bootstrap_contract.py \
      --repo REPOSITORY --feature FEATURE_PATH --learning-mode MODE --output LAUNCH_CONTRACT
    ```
 
@@ -145,11 +146,11 @@ an existing root-level launcher, which keeps working unchanged.
 7. Make stage order explicit and serial unless actual interfaces and shared-state rules
    prove concurrency safe. Use argv arrays and environment references, never shell
    strings, `eval`, `sh -c`, or blanket answers to prompts.
-8. Validate, then render:
+8. Validate, then render. Same rule as step 3 — a shell command line, not a subprocess call:
 
    ```text
-   python3 SKILL_ROOT/scripts/validate_contract.py --promote LAUNCH_CONTRACT
-   python3 SKILL_ROOT/scripts/render_launcher.py \
+   MOL_VIA=shell python3 SKILL_ROOT/scripts/validate_contract.py --promote LAUNCH_CONTRACT
+   MOL_VIA=shell python3 SKILL_ROOT/scripts/render_launcher.py \
      --contract LAUNCH_CONTRACT --output RUN_SCRIPT
    ```
 
@@ -158,13 +159,22 @@ an existing root-level launcher, which keeps working unchanged.
    is `open`, `--promote` exits 20, leaves (or sets) `draft`, and prints each blocker; that
    draft, with its blockers, is the deliverable for a blocked pipeline. Do not render a
    launch-ready script from it, and do not resolve a blocker to make the check pass.
-9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`. Dry-run is read-only and
-   takes precedence over `--implement` and `--smoke` in every argument order. Run further
-   stubbed checks when the generated setup, decision, or recovery logic warrants them.
-   In `generate` this is where the work ends; say so, and offer `run`. In `auto` the
-   generated artifacts are complete at this point: go straight to step 11 with the path
-   you just rendered. Do not revisit steps 1-8, and do not re-check the ignore rule, the
-   contract or the launcher again — the gate in step 11 checks all of it, by name.
+9. Run `bash -n RUN_SCRIPT` and invoke `RUN_SCRIPT --dry-run`, the same shell command line
+   style as steps 3 and 8 (neither call is one of the skill's scripts, so there is no
+   marker to carry):
+
+   ```text
+   bash -n RUN_SCRIPT
+   RUN_SCRIPT --dry-run
+   ```
+
+   Dry-run is read-only and takes precedence over `--implement` and `--smoke` in every
+   argument order. Run further stubbed checks when the generated setup, decision, or
+   recovery logic warrants them. In `generate` this is where the work ends; say so, and
+   offer `run`. In `auto` the generated artifacts are complete at this point: go straight
+   to step 11 with the path you just rendered. Do not revisit steps 1-8, and do not
+   re-check the ignore rule, the contract or the launcher again — the gate in step 11
+   checks all of it, by name.
 
 ## Execution
 
