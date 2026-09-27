@@ -17,7 +17,7 @@ Every fenced block below is a command line. Run it as one, in a shell, from the
 repository root, and read what it prints. Do not re-implement it through another
 language's process API: the working directory, the environment and the quoting are part
 of the command, and a wrapper is where they get lost. In a notebook-style harness that
-means a shell cell (`%%bash`) or a `!` line, not `subprocess.run`.
+means a shell cell (`%%bash`) or a line starting with an exclamation mark, not `subprocess.run`.
 
 Work inside the repository and `SKILL_ROOT` only. Do not list or read parent directories,
 sibling directories, your home directory or the wider filesystem, and do not search for
