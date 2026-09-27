@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,66 @@ SKILL = ROOT / "skills" / "mixture-of-loops"
 SCRIPTS = SKILL / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import contract_lib  # noqa: E402
+
+
+# Host template patterns pinned at anomalyco/opencode@a42f393c850bec0c0f395fb91bf19b1ee8b31666
+# (opencode-ai 1.18.32, under packages/opencode/src/). Sources are verbatim (research.md R1).
+# Changing a source, or the pin, is a new roadmap change — not a silent edit. A match is fixed
+# by rewording the skill text, never the pattern (FR-004, data-model "Host template pattern").
+HOST_TEMPLATE_PATTERNS = (
+    ("shell", r"/!`([^`]+)`/g", "oc1:config/markdown.ts:6,12; session/prompt.ts:1397-1407,1592", "run !`date` now"),
+    ("positional", r"/\$(\d+)/g", "oc1:session/prompt.ts:1376-1389,1595", "print $1"),
+    ("arguments", "$ARGUMENTS", "oc1:session/prompt.ts:1390-1391 (a string: includes/replaceAll)", "use $ARGUMENTS here"),
+    ("file", r"/(?<![\w`])@(\.?[^\s`,.]*(?:\.[^\s`,.]+)*)/g", "oc1:config/markdown.ts:5,8-10; session/prompt.ts:160,1432", "see @references/contract.md"),
+)
+
+# JS escape -> Python replacement. Needed because re.ASCII narrows \s, Python's Unicode \w/\d
+# differ from JS, and Python's \s additionally includes U+001C-U+001F and U+0085 while JS
+# (no u flag) includes U+FEFF. In these four literals \w and \s occur only inside a character
+# class and \d only outside one, so the fixed placement assumption below holds for these four
+# literals only.
+_JS_CLASS_WORD = "A-Za-z0-9_"
+_JS_CLASS_SPACE = (
+    "\\t\\n\\x0b\\x0c\\r \\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029"
+    "\\u202f\\u205f\\u3000\\ufeff"
+)
+
+
+def compile_opencode_pattern(kind: str, source: str) -> re.Pattern[str]:
+    """Translate one verbatim OpenCode JS pattern (research.md R2) into a Python pattern."""
+    if kind == "arguments":
+        return re.compile(re.escape(source))
+    assert source.startswith("/") and source.endswith("/g"), source
+    body, flags = source[1:-2], source[-1]
+    assert flags == "g", f"unexpected flags {flags!r} in {source!r}"
+    body = body.replace("\\w", _JS_CLASS_WORD)
+    body = body.replace("\\s", _JS_CLASS_SPACE)
+    body = body.replace("\\d", "[0-9]")
+    return re.compile(body)
+
+
+HOST_TEMPLATE_REGEXES = tuple(
+    (kind, compile_opencode_pattern(kind, source)) for kind, source, _, _ in HOST_TEMPLATE_PATTERNS
+)
+
+
+def host_template_report(named_texts) -> list[str]:
+    """Report every host template token match, sorted by path then offset (research.md R3)."""
+    found: list[tuple[str, int, str, str, str]] = []
+    for display_path, text in named_texts:
+        for kind, pattern in HOST_TEMPLATE_REGEXES:
+            for match in pattern.finditer(text):
+                found.append((display_path, match.start(), kind, match.group(0), text))
+    found.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [
+        f"{display_path}:{text_.count(chr(10), 0, start) + 1}: {kind}: {matched!r}"
+        for display_path, start, kind, matched, text_ in found
+    ]
+
+
+def skill_text_files() -> list[Path]:
+    """Files scanned by the lint: SKILL.md plus references/*.md directly under references/."""
+    return [SKILL / "SKILL.md"] + sorted((SKILL / "references").glob("*.md"))
 
 
 def digest(path: Path) -> str:
@@ -75,6 +136,40 @@ def base_contract(repository: Path, source: Path, stages: list[dict]) -> dict:
 
 
 class MixtureOfLoopsTests(unittest.TestCase):
+    def test_skill_text_has_no_host_template_tokens(self) -> None:
+        files = skill_text_files()
+        self.assertIn(SKILL / "SKILL.md", files,
+                      "expected the scan to include skills/mixture-of-loops/SKILL.md")
+        self.assertTrue(any(item.parent == SKILL / "references" for item in files),
+                        "expected at least one file globbed from skills/mixture-of-loops/references")
+        report = host_template_report((item.relative_to(ROOT).as_posix(),
+                                       item.read_bytes().decode("utf-8")) for item in files)
+        self.assertEqual(
+            report, [],
+            "host template tokens in skill text (OpenCode expands these; patterns from "
+            "anomalyco/opencode@a42f393c).\nReword the text; do not change the patterns.")
+
+    def test_host_template_patterns_catch_their_own_tokens(self) -> None:
+        for kind, _, _, bad_sample in HOST_TEMPLATE_PATTERNS:
+            with self.subTest(kind=kind):
+                report = host_template_report([("sample", bad_sample)])
+                self.assertEqual(
+                    len(report), 1,
+                    f"sample {bad_sample!r} of kind {kind!r} must match exactly once: {report}")
+                self.assertIn(f": {kind}: ", report[0],
+                              f"sample {bad_sample!r}: {report}")
+        with self.subTest(kind="shell", sample="multi-line"):
+            report = host_template_report([("sample", "x\n!`a\nb` y")])
+            self.assertEqual(
+                report, ["sample:2: shell: '!`a\\nb`'"],
+                "the newline inside the span must print as backslash-n (repr): " + repr(report))
+        for good_sample in ("`!`", "! `x`"):
+            with self.subTest(sample=good_sample):
+                report = host_template_report([("sample", good_sample)])
+                self.assertEqual(
+                    report, [],
+                    f"known-good sample {good_sample!r} must not match: {report}")
+
     def test_bootstrap_inventory_and_semantic_staleness(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
