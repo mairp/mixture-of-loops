@@ -16,6 +16,12 @@ merge_protections:
     success_conditions:
       # `ci` is the single gate job that fans in the whole test matrix.
       - check-success = ci
+      # No AI-assistant session or conversation may be exposed (.github/workflows/no-session-links.yml):
+      # the status covers files, commit messages and the whole PR conversation; title and body are
+      # also refused here directly.
+      - check-success = no-session-links
+      - -title ~= (?i)claude[.]ai
+      - -body ~= (?i)claude[.]ai
 
 # Head branches are deleted by GitHub's own delete_branch_on_merge repository
 # setting, not from here. The pull_request_rules engine is not evaluated on
