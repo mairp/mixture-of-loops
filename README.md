@@ -1,7 +1,7 @@
 # mixture-of-loops
 
 [![CI](https://github.com/mairp/mixture-of-loops/actions/workflows/ci.yml/badge.svg)](https://github.com/mairp/mixture-of-loops/actions/workflows/ci.yml)
-[![Built with Specstride](https://img.shields.io/badge/built%20with-Specstride-5a9a0a)](https://github.com/mairp/specstride)
+[![Built with Specstride](https://img.shields.io/badge/built%20with-Specstride-5a9a0a)](https://specstride.ai)
 
 `mixture-of-loops` is one maintained Agent Skills package for Claude Code, Codex,
 DeepSeek Harness (dsh), pi, and prime (Prime Intellect's pi-based agent). It reads Spec Kit feature artifacts holistically and
