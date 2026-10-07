@@ -266,6 +266,62 @@ On dsh the model binding is enforced with a throwaway `$HOME` overlay per batch,
 patched `agent-default-model` loses to `settings.yaml` at run time — see
 [skills/specstride-batch/references/dsh-model-binding.md](skills/specstride-batch/references/dsh-model-binding.md).
 
+## Skill profiles on the host
+
+Sessions on the authoring host are launched with a curated `settings-*.json` profile
+(`claude --settings ~/.claude/settings-<name>.json`). Each profile carries a
+`skillOverrides` map that decides which installed skills load: `"on"` (model-invocable
+and user-invocable), `"user-invocable-only"` (explicit `/skill` calls only), `"off"`
+(hidden). One override is constant across every profile —
+`anthropic-skills:import-memory: on` — and the plain `settings.json` base leaves
+everything off except `autoharness:learn`. The profiles:
+
+| Profile | Skills enabled | Purpose |
+|---|---|---|
+| `settings-mixture-of-loops-only.json` | `mixture-of-loops`, `autoharness:learn`; `speckit-reverse` user-invocable-only | Focused contract derivation: turn spec/plan/tasks into a provenance-bound MoL launch contract and run it |
+| `settings-specstride-batch.json` | `specstride-batch`, `speckit-batch`, `mixture-of-loops`, the full `speckit-*` suite, `spec-reconcile`, `qmd-recall`, `anthropic-skills:skill-creator`; `speckit-reverse` user-invocable-only | The batch profile: run the Specstride / MoL pipeline over many features at once, with fleet memory recall and spec-vs-deployed reconciliation alongside |
+| `settings-speckit-qmd-only.json` | the full `speckit-*` suite, `speckit-batch`, `mixture-of-loops`, `spec-reconcile`, `anthropic-skills:skill-creator` | Spec Kit authoring end to end — specify, clarify, plan, tasks, implement, analyze, checklist, constitution, converge, issues — plus batch runs |
+| `settings-speckit-reverse-only.json` | `speckit-reverse`, `mixture-of-loops` | Reverse-engineer an existing codebase into a complete as-is Spec Kit feature with `specstride reverse`, then pipeline it |
+| `settings-gpu-ops.json` | `gpu-ops`, `speckit-reverse` | Operate and inspect the RTX 3090 eGPU (status, VRAM, drain, safe power cycle) via the proven scripts in `/root/gpu_rtx_3090` |
+| `settings-jupyter-pull-only.json` | `jupyter-pull`, `autoharness:learn` | Pull every file off a remote Jupyter server the user is logged into, given only the pasted session cookie |
+| `settings-skill-creator.json` | `anthropic-skills:skill-creator`, `jupyter-pull`, `autoharness:learn` | Author and package new skills |
+| `settings-qmd-only.json` | `autoharness:learn` only (every named skill off) | Minimal baseline session |
+
+One-line descriptions of the skills those profiles toggle (from each `SKILL.md`
+frontmatter):
+
+- **mixture-of-loops** — derive a complete, unattended Specstride pipeline from one or
+  more Spec Kit feature sets (spec.md, plan.md, tasks.md, verification declarations,
+  release gates) as a provenance-bound launch contract plus executable run script.
+- **specstride-batch** — run that pipeline over several features at once: one MoL
+  contract per feature, sequential or N in parallel, on claude or dsh, model and
+  reasoning pinned per run, shared queue, background tracking (see
+  [the section above](#the-specstride-batch-skill)).
+- **speckit-batch** — the same batch runner for plain Spec Kit skills: any `/speckit-*`
+  command (analyze by default) over several specs, on claude or dsh.
+- **speckit-reverse** — reverse-engineer an existing codebase into a complete as-is Spec
+  Kit feature (constitution, spec, checklist, plan, research, contracts, ticked tasks).
+- **speckit-\* suite** (`specify`, `clarify`, `constitution`, `plan`, `tasks`,
+  `analyze`, `checklist`, `implement`, `converge`, `taskstoissues`) — the standard Spec
+  Kit authoring workflow, one skill per artifact.
+- **spec-reconcile** — read a spec folder and the deployed surfaces read-only, then write
+  a dated spec-vs-deployed sheet in a fixed vocabulary.
+- **qmd-recall** — recall from and write to the shared fleet memory (qmd) on this host.
+- **gpu-ops** — operate and inspect the RTX 3090 eGPU (Thunderbolt-4 enclosure) via the
+  proven scripts in `/root/gpu_rtx_3090`.
+- **jupyter-pull** — download every file from a remote Jupyter server given only the
+  browser session cookie.
+- **anthropic-skills:skill-creator** and **anthropic-skills:import-memory** — Anthropic's
+  packaged skills for authoring new skills and importing memory.
+- **autoharness:learn** — save a lesson on `/learn`.
+
+Two curation notes. `speckit-task-organization` appears as an `off` override in two
+profiles but has no installed `SKILL.md` on this host, so it is a stale entry. And the
+overrides for the `anthropic-skills:docx/pdf/pptx/xlsx/docs/morning` set, `video-to-deck`,
+`antares-scan`, `fleet-control`, `proxmox-ops`, `proxmox-triage`, `local-model-ops`, and
+the other host skills exist only to keep a profile quiet about skills it deliberately
+does not use — `off` hides them from discovery, it does not uninstall them.
+
 ## Requirements
 
 - Linux or macOS local execution
