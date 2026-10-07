@@ -4,15 +4,17 @@
 [![Built with Specstride](https://img.shields.io/badge/built%20with-Specstride-5a9a0a)](https://specstride.ai)
 
 `mixture-of-loops` is one maintained Agent Skills package for Claude Code, Codex,
-DeepSeek Harness (dsh), pi, and prime (Prime Intellect's pi-based agent). It reads Spec Kit feature artifacts holistically and
+DeepSeek Harness (dsh), pi, and prime (Prime Intellect's pi-based agent). It carries two
+skills: it reads Spec Kit feature artifacts holistically and
 generates a provenance-bound launch contract plus an executable, unattended Specstride
-pipeline.
+pipeline, and it runs that same pipeline over batches of feature directories at once.
 
 Specstride was formerly Wiggum: contracts that still use the
 `wiggum` stage kind keep validating with a deprecation warning and launch `specstride run`.
 
-The canonical skill is [skills/mixture-of-loops/SKILL.md](skills/mixture-of-loops/SKILL.md).
-All five harnesses link to that directory so fixes do not drift between copies.
+The canonical skills are [skills/mixture-of-loops/SKILL.md](skills/mixture-of-loops/SKILL.md)
+and [skills/specstride-batch/SKILL.md](skills/specstride-batch/SKILL.md).
+All five harnesses link to those directories so fixes do not drift between copies.
 
 ## Use
 
@@ -199,6 +201,70 @@ expression that cannot be expressed as fixed `argv`, become a blocker instead of
 and a phase with no declared commands stays explicitly empty. Specstride's own discovered
 project tests still run, but they are supplemental and are never reported as the declared
 gate.
+
+## The specstride-batch skill
+
+[skills/specstride-batch/SKILL.md](skills/specstride-batch/SKILL.md) runs one Specstride
+(Mixture of Loops) pass across many `specs/<id>-*` folders: it derives one MoL contract
+per feature and launches it, sequentially or N features in parallel, on `claude` (Claude
+Code) or `dsh` (DeepSeek Harness), with the model and reasoning effort pinned per run. The
+mechanics live in two scripts beside the SKILL.md — `run-batch.sh` for one batch and
+`chain.sh` for queued batches — so the harness only picks parameters, launches, tracks,
+and reports.
+
+What you say and what runs:
+
+| You say | It runs |
+|---|---|
+| "derive 105-107 with claude/fable" | `--harness claude --model fable 105-107` |
+| "108 to 111 on dsh, glm-5.3, max reasoning" | `--harness dsh --model glm-5.3 --reasoning max 108-111` |
+| "run 3 at a time" | add `--jobs 3` |
+| "next batch when this one ends", "batches of 4-5" | `chain.sh` with a queue file |
+| "only derive, don't launch" | `--mode derive` |
+| "only launch, the contracts exist" | `--mode launch` |
+
+Spec numbering has gaps, so selectors are flexible and mixable: `105-107` (range),
+`122,123,124` (list), `113` (one id), `130-adapter-dsh` (folder name). Missing ids inside
+a range are logged as `SKIP`, never an error, and duplicates run once.
+
+```bash
+S=$PACKAGE/skills/specstride-batch/scripts
+cd <spec-kit-repo>            # or pass --repo; it must hold specs/ and .specify/
+
+# always --dry-run first: prints the resolved feature list and the exact prompt, writes nothing
+$S/run-batch.sh --harness dsh --model glm-5.3 --reasoning max --dry-run 108-111
+
+# then launch detached — a feature takes 10-60 min
+nohup $S/run-batch.sh --harness claude --model fable --reasoning high 105-107 > /dev/null 2>&1 &
+```
+
+The prompt per feature names the `mixture-of-loops` skill, derives and validates the
+contract for exactly that feature, and — unless `--mode derive` — launches the run and
+supervises it to an end state (`done` / `failed` / `parked`). `--prompt-tail` overrides
+the tail for a custom pass. Logs land in `<repo>/../specstride-batch-runs/logs/`
+(override with `--logdir`): an append-only `<harness>.status` (`RANGE`, `START`, `END
+rc=N`, `SKIP`, `ALL-DONE`) and one `<harness>-<feature>.log` with the agent's final
+message.
+
+For queued campaigns, `chain.sh` drains a queue file of selector lines; claims are atomic
+under `flock`, so two harnesses can drain one queue side by side without doubling a batch:
+
+```bash
+printf '%s\n' "112-117" "118-124" "125-129" > queue.txt
+nohup $S/chain.sh --queue queue.txt -- --harness dsh --model glm-5.3 --reasoning max &
+```
+
+On a provider quota stop (exit 75) the unfinished features go back to the front of the
+queue and the chain sleeps until the reset time named in the error (`--on-quota stop`
+ends the chain instead). A pool of N parallel slots is N chains with `--jobs 1` over a
+queue of one feature per line.
+
+Campaign safety: a feature the Specstride campaign is implementing right now (listed in
+`.mixture-of-loops/campaign/active.json`) is skipped, never double-run, and a feature that
+already has a live MoL run is reported so you can decide rather than silently overwritten.
+On dsh the model binding is enforced with a throwaway `$HOME` overlay per batch, because a
+patched `agent-default-model` loses to `settings.yaml` at run time — see
+[skills/specstride-batch/references/dsh-model-binding.md](skills/specstride-batch/references/dsh-model-binding.md).
 
 ## Requirements
 
