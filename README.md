@@ -278,11 +278,11 @@ everything off except `autoharness:learn`. The profiles:
 
 | Profile | Skills enabled | Purpose |
 |---|---|---|
-| `settings-mixture-of-loops-only.json` | `mixture-of-loops`, `autoharness:learn`; `speckit-reverse` user-invocable-only | Focused contract derivation: turn spec/plan/tasks into a provenance-bound MoL launch contract and run it |
-| `settings-specstride-batch.json` | `specstride-batch`, `speckit-batch`, `mixture-of-loops`, the full `speckit-*` suite, `spec-reconcile`, `qmd-recall`, `anthropic-skills:skill-creator`; `speckit-reverse` user-invocable-only | The batch profile: run the Specstride / MoL pipeline over many features at once, with fleet memory recall and spec-vs-deployed reconciliation alongside |
+| `settings-mixture-of-loops-only.json` | `mixture-of-loops`, `autoharness:learn`; `specstride-reverse` user-invocable-only | Focused contract derivation: turn spec/plan/tasks into a provenance-bound MoL launch contract and run it |
+| `settings-specstride-batch.json` | `specstride-batch`, `speckit-batch`, `mixture-of-loops`, the full `speckit-*` suite, `spec-reconcile`, `qmd-recall`, `anthropic-skills:skill-creator`; `specstride-reverse` user-invocable-only | The batch profile: run the Specstride / MoL pipeline over many features at once, with fleet memory recall and spec-vs-deployed reconciliation alongside |
 | `settings-speckit-qmd-only.json` | the full `speckit-*` suite, `speckit-batch`, `mixture-of-loops`, `spec-reconcile`, `anthropic-skills:skill-creator` | Spec Kit authoring end to end — specify, clarify, plan, tasks, implement, analyze, checklist, constitution, converge, issues — plus batch runs |
-| `settings-speckit-reverse-only.json` | `speckit-reverse`, `mixture-of-loops` | Reverse-engineer an existing codebase into a complete as-is Spec Kit feature with `specstride reverse`, then pipeline it |
-| `settings-gpu-ops.json` | `gpu-ops`, `speckit-reverse` | Operate and inspect the RTX 3090 eGPU (status, VRAM, drain, safe power cycle) via the proven scripts in `/root/gpu_rtx_3090` |
+| `settings-specstride-reverse-only.json` | `specstride-reverse`, `mixture-of-loops` | Reverse-engineer an existing codebase into a complete as-is Spec Kit feature with `specstride reverse`, then pipeline it |
+| `settings-gpu-ops.json` | `gpu-ops`, `specstride-reverse` | Operate and inspect the RTX 3090 eGPU (status, VRAM, drain, safe power cycle) via the proven scripts in `/root/gpu_rtx_3090` |
 | `settings-jupyter-pull-only.json` | `jupyter-pull`, `autoharness:learn` | Pull every file off a remote Jupyter server the user is logged into, given only the pasted session cookie |
 | `settings-skill-creator.json` | `anthropic-skills:skill-creator`, `jupyter-pull`, `autoharness:learn` | Author and package new skills |
 | `settings-qmd-only.json` | `autoharness:learn` only (every named skill off) | Minimal baseline session |
@@ -299,7 +299,7 @@ frontmatter):
   [the section above](#the-specstride-batch-skill)).
 - **speckit-batch** — the same batch runner for plain Spec Kit skills: any `/speckit-*`
   command (analyze by default) over several specs, on claude or dsh.
-- **speckit-reverse** — reverse-engineer an existing codebase into a complete as-is Spec
+- **specstride-reverse** — reverse-engineer an existing codebase into a complete as-is Spec
   Kit feature (constitution, spec, checklist, plan, research, contracts, ticked tasks).
 - **speckit-\* suite** (`specify`, `clarify`, `constitution`, `plan`, `tasks`,
   `analyze`, `checklist`, `implement`, `converge`, `taskstoissues`) — the standard Spec
