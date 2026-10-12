@@ -1379,3 +1379,36 @@ class LearningModeSelectionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[MOL-LEARNING] mode=apply source=prose", result.stdout)
         self.assertIn("use suggest", result.stdout)
+
+
+class LaunchScopeTests(unittest.TestCase):
+    """A session of its own is not enough: the launcher must leave the harness's control
+    group, or it is signalled with the harness service (incident 2026-10-12, exit 130)."""
+
+    def test_the_scope_can_be_turned_off(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"MOL_LAUNCH_SCOPE": "0"}):
+            self.assertEqual(mol.scope_argv("demo"), [])
+
+    def test_a_host_without_systemd_run_launches_as_before(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"MOL_LAUNCH_SCOPE": "1"}), \
+                unittest.mock.patch.object(mol.shutil, "which", return_value=None):
+            self.assertEqual(mol.scope_argv("demo"), [])
+
+    def test_a_refused_probe_launches_as_before(self) -> None:
+        refused = subprocess.CompletedProcess([], 1)
+        with unittest.mock.patch.dict(os.environ, {"MOL_LAUNCH_SCOPE": "1"}), \
+                unittest.mock.patch.object(mol.shutil, "which", return_value="/usr/bin/systemd-run"), \
+                unittest.mock.patch.object(mol.Path, "is_dir", return_value=True), \
+                unittest.mock.patch.object(mol.subprocess, "run", return_value=refused):
+            self.assertEqual(mol.scope_argv("demo"), [])
+
+    def test_an_accepted_probe_names_a_scope_unit_for_the_pipeline(self) -> None:
+        accepted = subprocess.CompletedProcess([], 0)
+        with unittest.mock.patch.dict(os.environ, {"MOL_LAUNCH_SCOPE": "1"}), \
+                unittest.mock.patch.object(mol.shutil, "which", return_value="/usr/bin/systemd-run"), \
+                unittest.mock.patch.object(mol.Path, "is_dir", return_value=True), \
+                unittest.mock.patch.object(mol.subprocess, "run", return_value=accepted):
+            prefix = mol.scope_argv("004 demo/x", now=1000.0)
+        self.assertEqual(prefix[:2], ["/usr/bin/systemd-run", "--scope"])
+        self.assertIn(f"--unit=mol-004-demo-x-1000-{os.getpid()}", prefix)
+        self.assertEqual(prefix[-1], "--")
