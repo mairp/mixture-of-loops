@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -577,14 +578,48 @@ def launch_argv(launcher: Path, *, implement: bool = False, smoke: bool = False)
     return argv
 
 
+def scope_argv(pipeline: str, *, now: float | None = None) -> list[str]:
+    """The argv prefix that puts the launcher in a systemd scope of its own, or [].
+
+    A session of its own does not take the launcher out of the control group it was
+    started in. When that group belongs to a harness service or a harness background
+    task, the manager signals every process in it once the service stops, crashes or
+    the task is reaped, and the "detached" launcher dies with it. `systemd-run --scope`
+    execs the command in place, so the PID, the session and the streams are unchanged.
+    The prefix is probed first: a host without a reachable manager launches as before.
+    `MOL_LAUNCH_SCOPE=0` turns it off.
+    """
+    if os.environ.get("MOL_LAUNCH_SCOPE", "1") == "0":
+        return []
+    runner = shutil.which("systemd-run")
+    if runner is None or not Path("/run/systemd/system").is_dir():
+        return []
+    stamp = int(time.time() if now is None else now)
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", pipeline).strip("-") or "pipeline"
+    prefix = [runner, "--scope", "--quiet", "--collect"]
+    if os.geteuid() != 0:
+        prefix.append("--user")
+    try:
+        probe = subprocess.run([*prefix, f"--unit=mol-probe-{os.getpid()}-{stamp}", "true"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if probe.returncode != 0:
+        return []
+    return [*prefix, f"--unit=mol-{slug}-{stamp}-{os.getpid()}",
+            f"--description=Mixture of Loops run {pipeline}", "--"]
+
+
 def launch(bundle: Bundle, *, mode: str, implement: bool = False, smoke: bool = False,
            budget: dict | None = None, now: float | None = None,
            environment: dict[str, str] | None = None) -> dict:
     """Start the launcher detached and write the supervisor's own launch record.
 
-    Detached means: stdin closed, a new session of its own, and both streams redirected
-    to a harness-owned log beside the run state. The pipeline therefore outlives this
-    process and the harness turn that started it.
+    Detached means: stdin closed, a new session of its own, a systemd scope of its own
+    where the host has one (see `scope_argv`), and both streams redirected to a
+    harness-owned log beside the run state. The pipeline therefore outlives this
+    process, the harness turn that started it, and the service the harness runs in.
     """
     run_dir = bundle.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -599,7 +634,8 @@ def launch(bundle: Bundle, *, mode: str, implement: bool = False, smoke: bool = 
         handle.write(f"\n=== launch {time.strftime('%Y-%m-%dT%H:%M:%S%z')} "
                      f"{' '.join(argv)} ===\n".encode())
         handle.flush()
-        child = subprocess.Popen(argv, cwd=bundle.launcher.parent, env=child_env,
+        child = subprocess.Popen([*scope_argv(bundle.pipeline, now=started), *argv],
+                                 cwd=bundle.launcher.parent, env=child_env,
                                  stdin=subprocess.DEVNULL, stdout=handle,
                                  stderr=subprocess.STDOUT, start_new_session=True)
     _CHILDREN[child.pid] = child
@@ -657,7 +693,8 @@ def relaunch(record: dict, *, justification: dict, now: float | None = None) -> 
         handle.write(f"\n=== relaunch {time.strftime('%Y-%m-%dT%H:%M:%S%z')} "
                      f"{' '.join(record['argv'])} ===\n".encode())
         handle.flush()
-        child = subprocess.Popen(record["argv"], cwd=record["cwd"],
+        child = subprocess.Popen([*scope_argv(record["pipeline"], now=started),
+                                  *record["argv"]], cwd=record["cwd"],
                                  env={**os.environ, "NO_COLOR": "1", "PYTHONDONTWRITEBYTECODE": "1"},
                                  stdin=subprocess.DEVNULL, stdout=handle,
                                  stderr=subprocess.STDOUT, start_new_session=True)

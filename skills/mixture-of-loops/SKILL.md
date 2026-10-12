@@ -288,7 +288,10 @@ or tool name.
 ### Launch discipline
 
 The launcher runs detached so the pipeline outlives the harness turn: stdin closed, a
-session of its own, color forced off, and both streams redirected to
+session of its own, a systemd scope of its own where the host has one (a new session
+alone stays in the harness's control group and is signalled with it when the harness
+service stops or crashes; `MOL_LAUNCH_SCOPE=0` turns the scope off), color forced off,
+and both streams redirected to
 `runs/<id>/harness-launch.log`, which is separate from the runtime-owned `launcher.log`.
 The command is an argv array; never a `sh -c` string, an `eval`, or a shell-interpolated
 path. Immediately afterwards a harness-owned launch record is written to
