@@ -147,7 +147,16 @@ an existing root-level launcher, which keeps working unchanged.
    `.mixture-of-loops/<feature>/verification-commands.json`, never under `generated/` or
    `runs/`, which the renderer and the runtime own. Its shape is fixed (references/contract.md, "Verification
    plan"): an object with a `commands` array whose entries carry `id`, `phase`,
-   `executable`, `args`, an absolute `cwd` and `timeoutSec`.
+   `executable`, `args`, an absolute `cwd` and `timeoutSec`. `args` never repeats the
+   executable: the runner runs `[executable] + args`, so `"bash", ["bash", "-c", …]` is
+   `bash bash -c` and fails every gate.
+   When the repository drives live infrastructure (the bootstrap lists `infra_markers`
+   and opens `live-infrastructure-health-check`), give every `specstride` stage a health
+   check: `"--health-cmd", "<executable>"` for a repository script that already checks
+   the lab, otherwise `"--health-cmd", "auto"` (the proposer writes and owns
+   `<state>/features/<feature>/health-check`). Opt out only with
+   `configuration.health_check {"mode": "none", "reason": …}`. The gate runs the check
+   once before launch (`infra-healthy`) and refuses a sick lab.
 6. Classify prerequisites by producer and earliest valid check. A future stage output is
    not a preflight input. Existing authorization may be consumed within its scope;
    missing non-delegable authority blocks before the affected model run. Never fabricate

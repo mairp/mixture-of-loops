@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -233,7 +234,67 @@ def verification_plan_problems(path: Path) -> list[str]:
         cwd = entry.get("cwd")
         if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
             problems.append(f"{where}.cwd must be an absolute path to an existing directory")
+        # Specstride runs [executable] + args, so an args[0] naming the executable again
+        # runs `bash bash -c ...` (exit 126 on every gate): 20 such entries froze into a
+        # 004 plan for phases 4-11 (2026-10-14). Specstride refuses it since #136; refuse
+        # it here too, before a launch.
+        executable = entry.get("executable")
+        if isinstance(executable, str) and executable and isinstance(args, list) and args \
+                and isinstance(args[0], str) \
+                and os.path.basename(args[0]) == os.path.basename(executable):
+            problems.append(f"{where}.args[0] {args[0]!r} repeats the executable; the runner "
+                            f"already runs [executable] + args — drop args[0]")
     return problems
+
+
+# ── live infrastructure: the loop must be able to see it ─────────────────────
+# A specstride loop that measures a lab, cluster or VM fleet runs blind unless it is
+# given a health check (specstride --health-cmd, #136/#137). Measured 2026-10-13 on
+# feature 004 (SONiC VMs under containerlab): a 4-hour replay chain ran on a lab whose
+# bgp unit systemd refused to start, and nothing in the loop noticed. A repository
+# carrying these markers gets a blocker until every specstride stage passes
+# --health-cmd PATH|auto or the contract opts out with a reason.
+INFRA_MARKER_PATTERNS = ("*.clab.yml", "*.clab.yaml", "kind-config*.yaml", "kind-config*.yml",
+                         "Vagrantfile", "provision.sh", "provision-*.sh")
+_INFRA_SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", ".mixture-of-loops",
+                    "__pycache__", "dist", "build", "target"}
+HEALTH_ENV = "SPECSTRIDE_HEALTH_CMD"
+
+
+def infra_markers(root: Path, limit: int = 10, max_depth: int = 4) -> list[str]:
+    """Workdir-relative files that say this repository drives live infrastructure."""
+    root = Path(root)
+    found: list[str] = []
+    for current, dirs, files in os.walk(root):
+        depth = len(Path(current).relative_to(root).parts)
+        skip = _INFRA_SKIP_DIRS | {STATE_DIRNAME, LEGACY_STATE_DIRNAME}
+        dirs[:] = sorted(d for d in dirs if d not in skip and depth < max_depth)
+        for name in sorted(files):
+            if any(fnmatch.fnmatch(name, pattern) for pattern in INFRA_MARKER_PATTERNS):
+                found.append(str((Path(current) / name).relative_to(root)))
+                if len(found) >= limit:
+                    return found
+    return found
+
+
+def stage_health_cmd(stage: dict) -> str | None:
+    """The health check a specstride stage passes: --health-cmd, else its env."""
+    values = _option_values(stage.get("action"), "--health-cmd")
+    if values:
+        return values[-1]
+    env = (stage.get("action") or {}).get("env") if isinstance(stage.get("action"), dict) else None
+    value = env.get(HEALTH_ENV) if isinstance(env, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def health_opt_out(contract: dict) -> str | None:
+    """configuration.health_check {"mode": "none", "reason": "..."} -> the reason."""
+    configuration = contract.get("configuration")
+    block = configuration.get("health_check") if isinstance(configuration, dict) else None
+    if isinstance(block, dict) and block.get("mode") == "none" \
+            and isinstance(block.get("reason"), str) and block["reason"].strip():
+        return block["reason"].strip()
+    return None
 
 
 def _option_values(action: object, option: str) -> list[str]:
@@ -771,6 +832,12 @@ def validate_contract(
                     if exists:
                         errors.extend(f"{label}.action --verification-commands {plan}: {problem}"
                                       for problem in verification_plan_problems(path))
+            health = stage_health_cmd(stage) if stage.get("kind") == "specstride" else None
+            if health and health != "auto":
+                path = resolve_path(health, stage_cwd)
+                _require(path.is_file() and os.access(path, os.X_OK),
+                         f"{label} health check {health} is not an executable file at {path}: "
+                         "write it, or pass --health-cmd auto so the proposer writes it", errors)
             if "resume" in stage:
                 _validate_action(stage.get("resume"), f"{label}.resume", errors)
             for field in ("preconditions", "postconditions"):
@@ -933,6 +1000,17 @@ def validate_contract(
 
     if not allow_draft:
         errors.extend(_unchecked_prerequisites(contract, root))
+        markers = infra_markers(root) if root.is_dir() else []
+        if markers and not health_opt_out(contract):
+            blind = [stage.get("id", "?") for stage in contract.get("stages") or []
+                     if isinstance(stage, dict) and stage.get("kind") == "specstride"
+                     and not stage_health_cmd(stage)]
+            if blind:
+                errors.append(
+                    f"the repository drives live infrastructure ({', '.join(markers[:3])}) but "
+                    f"specstride stage(s) {', '.join(blind)} pass no health check: add "
+                    "\"--health-cmd\", \"<executable>\" (or \"auto\": the proposer writes it) to the "
+                    "stage argv, or set configuration.health_check {\"mode\": \"none\", \"reason\": ...}")
 
     if errors:
         raise ContractError("\n".join(errors))

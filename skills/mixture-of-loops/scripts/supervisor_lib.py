@@ -38,6 +38,8 @@ from contract_lib import (
     learning_binding_problem,
     load_contract,
     resolve_path,
+    stage_health_cmd,
+    state_dirname,
     validate_contract,
 )
 from render_launcher import existing_launcher_is_intact
@@ -463,7 +465,7 @@ def gate(launcher: Path, *, implement: bool = False, smoke: bool = False,
     """
     launcher = Path(launcher).resolve()
     names = ["launcher-intact", "contract-validated", "authorized-root",
-             "launcher-syntax", "launcher-dry-run", "run-directory-free"]
+             "launcher-syntax", "launcher-dry-run", "run-directory-free", "infra-healthy"]
     checks: list[GateCheck] = []
     bundle: Bundle | None = None
 
@@ -547,7 +549,67 @@ def gate(launcher: Path, *, implement: bool = False, smoke: bool = False,
                           "attach and report that run instead of starting a second one",
                           bundle)
     checks.append(GateCheck("run-directory-free", "pass", detail=str(bundle.run_dir)))
+
+    # A loop launched onto sick infrastructure measures the sickness for hours (004,
+    # 2026-10-13). Run each specstride stage's health check once, now: an operator
+    # script, or the proposer's own (`auto`) once it has written one.
+    for command, cwd in health_checks_to_run(bundle.contract, root):
+        try:
+            result = subprocess.run([str(command)], cwd=cwd, stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=HEALTH_GATE_TIMEOUT,
+                                    start_new_session=True, check=False)
+            rc, output = result.returncode, (result.stdout + result.stderr).strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            rc, output = -1, str(exc)
+        if rc != 0:
+            return refuse("infra-healthy", "infra-unhealthy",
+                          f"{command} exited {rc}: {output[-400:]}",
+                          "heal the infrastructure (the check's output says what is wrong), "
+                          "then launch again; never launch a loop onto it as it is")
+    checks.append(GateCheck("infra-healthy", "pass"))
     return GateReport(checks, "launch", bundle=bundle)
+
+
+HEALTH_GATE_TIMEOUT = 180
+
+
+def health_checks_to_run(contract: dict, root: Path) -> list[tuple[Path, Path]]:
+    """(executable, cwd) for every specstride stage's health check that exists now."""
+    out: list[tuple[Path, Path]] = []
+    for stage in contract.get("stages") or []:
+        if not isinstance(stage, dict) or stage.get("kind") != "specstride":
+            continue
+        health = stage_health_cmd(stage)
+        if not health:
+            continue
+        cwd = resolve_path(stage.get("cwd") or ".", root)
+        if health == "auto":
+            argv = (stage.get("action") or {}).get("argv") or []
+            workdir = resolve_path(_argv_value(argv, "-w", "--workdir") or ".", cwd)
+            feature = _argv_value(argv, "--feature")
+            if not feature:
+                continue
+            candidate = workdir / state_dirname(workdir) / "features" / feature / "health-check"
+            if not (candidate.is_file() and os.access(candidate, os.X_OK)):
+                continue          # not written yet: specstride itself makes the proposer write it
+            command, run_cwd = candidate, workdir
+        else:
+            command, run_cwd = resolve_path(health, cwd), cwd
+        if (command, run_cwd) not in out:
+            out.append((command, run_cwd))
+    return out
+
+
+def _argv_value(argv: list, *names: str) -> str | None:
+    for index, item in enumerate(argv):
+        if not isinstance(item, str):
+            continue
+        for name in names:
+            if item == name and index + 1 < len(argv) and isinstance(argv[index + 1], str):
+                return argv[index + 1]
+            if item.startswith(name + "="):
+                return item.split("=", 1)[1]
+    return None
 
 
 # ── 5. launching, and the supervisor's own launch record ──────────────────────

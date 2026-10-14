@@ -422,7 +422,8 @@ class GateTests(Fixture):
         self.assertEqual(report.decision, "launch", report.messages())
         self.assertEqual([check.name for check in report.checks],
                          ["launcher-intact", "contract-validated", "authorized-root",
-                          "launcher-syntax", "launcher-dry-run", "run-directory-free"])
+                          "launcher-syntax", "launcher-dry-run", "run-directory-free",
+                          "infra-healthy"])
         self.assertTrue(all(check.status == "pass" for check in report.checks))
 
     def test_an_edited_launcher_is_never_run_under_this_skill(self) -> None:
@@ -433,7 +434,7 @@ class GateTests(Fixture):
         self.assert_refused(report, "launcher-intact", "launcher-edited")
         self.assertIn("--replace-edited", report.next_action)
         self.assertEqual([check.status for check in report.checks[1:]],
-                         ["not-evaluated"] * 5)
+                         ["not-evaluated"] * 6)
 
     def test_a_missing_launcher_is_named_rather_than_generated(self) -> None:
         base = self.workspace()
@@ -1155,6 +1156,57 @@ def specstride_stage(*, recovery: bool = True, feature_paths: bool = True) -> di
     return stage
 
 
+
+def health_stage(health: str, cwd: str = ".") -> dict:
+    stage = specstride_stage(recovery=False)
+    stage["cwd"] = cwd
+    stage["action"]["argv"] += ["--health-cmd", health]
+    return stage
+
+
+def health_script(base: Path, rc: int, name: str = "lab-health.sh") -> Path:
+    script = base / name
+    script.write_text(f"#!/bin/bash\necho 'leaf01 bgp: inactive'\nexit {rc}\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+class InfraHealthGateTests(Fixture):
+    """A loop launched onto sick infrastructure measures the sickness for hours
+    (feature 004, 2026-10-13). The gate runs each stage's health check once."""
+
+    def launcher_with(self, stage_for) -> Path:
+        base = self.workspace()
+        contract = contract_for(base, [stage_for(base)])
+        return render(contract, base)
+
+    def test_a_failing_health_check_refuses_the_launch(self) -> None:
+        launcher = self.launcher_with(lambda base: health_stage(str(health_script(base, 3))))
+        report = mol.gate(launcher)
+        self.assertEqual(report.decision, "refuse", report.messages())
+        self.assertEqual(report.reason, "infra-unhealthy")
+        self.assertIn("leaf01 bgp: inactive", report.detail)
+        self.assertIn("heal the infrastructure", report.next_action)
+
+    def test_a_healthy_check_passes_the_gate(self) -> None:
+        launcher = self.launcher_with(lambda base: health_stage(str(health_script(base, 0))))
+        report = mol.gate(launcher)
+        self.assertEqual(report.decision, "launch", report.messages())
+        self.assertEqual(report.checks[-1].name, "infra-healthy")
+
+    def test_auto_without_a_written_check_does_not_block_the_launch(self) -> None:
+        launcher = self.launcher_with(lambda base: health_stage("auto"))
+        self.assertEqual(mol.gate(launcher).decision, "launch")
+
+    def test_auto_runs_the_check_the_proposer_wrote(self) -> None:
+        def stage(base: Path) -> dict:
+            target = base / ".specstride" / "features" / "007"
+            target.mkdir(parents=True)
+            health_script(target, 2, name="health-check")
+            return health_stage("auto")
+        report = mol.gate(self.launcher_with(stage))
+        self.assertEqual(report.reason, "infra-unhealthy", report.messages())
+
 class RetrospectiveTests(Fixture):
     def setup_stub(self, base: Path, **env: str) -> Path:
         bin_dir = base / "stub-bin"
@@ -1412,3 +1464,71 @@ class LaunchScopeTests(unittest.TestCase):
         self.assertEqual(prefix[:2], ["/usr/bin/systemd-run", "--scope"])
         self.assertIn(f"--unit=mol-004-demo-x-1000-{os.getpid()}", prefix)
         self.assertEqual(prefix[-1], "--")
+
+
+class InfraHealthContractTests(Fixture):
+    """A repository that drives live infrastructure must give its loops a health check."""
+
+    def infra_repository(self) -> Path:
+        base = self.workspace()
+        (base / "lab").mkdir()
+        (base / "lab" / "fabric.clab.yml").write_text("name: fabric\n", encoding="utf-8")
+        return base
+
+    def test_markers_are_found_and_build_output_is_skipped(self) -> None:
+        base = self.infra_repository()
+        (base / "node_modules" / "x").mkdir(parents=True)
+        (base / "node_modules" / "x" / "other.clab.yml").write_text("", encoding="utf-8")
+        (base / "scripts").mkdir()
+        (base / "scripts" / "provision.sh").write_text("", encoding="utf-8")
+        self.assertEqual(contract_lib.infra_markers(base),
+                         ["lab/fabric.clab.yml", "scripts/provision.sh"])
+
+    def test_a_blind_specstride_stage_is_refused(self) -> None:
+        base = self.infra_repository()
+        contract = contract_for(base, [specstride_stage(recovery=False)])
+        with self.assertRaises(contract_lib.ContractError) as caught:
+            contract_lib.validate_contract(contract, check_sources=False)
+        self.assertIn("pass no health check", str(caught.exception))
+        self.assertIn("lab/fabric.clab.yml", str(caught.exception))
+
+    def test_auto_an_operator_script_or_a_reasoned_opt_out_validates(self) -> None:
+        base = self.infra_repository()
+        script = health_script(base, 0)
+        for stage in (health_stage("auto"), health_stage(str(script))):
+            contract_lib.validate_contract(contract_for(base, [stage]), check_sources=False)
+        stage = specstride_stage(recovery=False)
+        stage["action"]["env"] = {"SPECSTRIDE_HEALTH_CMD": "auto"}
+        contract_lib.validate_contract(contract_for(base, [stage]), check_sources=False)
+        opted = contract_for(base, [specstride_stage(recovery=False)])
+        opted["configuration"] = {"health_check": {"mode": "none", "reason": "dry-run only"}}
+        contract_lib.validate_contract(opted, check_sources=False)
+
+    def test_a_health_path_that_is_not_executable_is_refused(self) -> None:
+        base = self.infra_repository()
+        (base / "health.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        with self.assertRaises(contract_lib.ContractError) as caught:
+            contract_lib.validate_contract(contract_for(base, [health_stage("health.sh")]),
+                                           check_sources=False)
+        self.assertIn("is not an executable file", str(caught.exception))
+
+    def test_a_repeated_executable_in_the_verification_plan_is_refused(self) -> None:
+        base = self.workspace()
+        plan = base / "verification-commands.json"
+        plan.write_text(json.dumps({"commands": [{
+            "id": "p1", "phase": 1, "executable": "bash", "args": ["bash", "-c", "true"],
+            "cwd": str(base), "timeoutSec": 10}]}), encoding="utf-8")
+        problems = contract_lib.verification_plan_problems(plan)
+        self.assertTrue(any("repeats the executable" in p for p in problems), problems)
+
+    def test_bootstrap_opens_a_blocker_for_live_infrastructure(self) -> None:
+        base = self.infra_repository()
+        feature = base / "specs" / "001-x"
+        feature.mkdir(parents=True)
+        (feature / "tasks.md").write_text("# Tasks\n## Phase 1: Setup\n- [ ] T001 do\n",
+                                          encoding="utf-8")
+        draft = bootstrap_contract.build_contract(base, [feature])
+        self.assertEqual(draft["inventory"]["infra_markers"], ["lab/fabric.clab.yml"])
+        finding = next(f for f in draft["findings"] if f["id"] == "live-infrastructure-health-check")
+        self.assertEqual((finding["severity"], finding["status"]), ("blocker", "open"))
+        self.assertIn("--health-cmd", finding["resolution"])
