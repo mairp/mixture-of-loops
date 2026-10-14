@@ -14,7 +14,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from contract_lib import learning_effective, learning_prefix, state_dirname, warn_if_not_shell_invoked  # noqa: E402
+from contract_lib import (  # noqa: E402
+    infra_markers, learning_effective, learning_prefix, state_dirname, warn_if_not_shell_invoked)
 
 
 ARTIFACTS = (
@@ -335,6 +336,30 @@ def build_contract(root: Path, features: list[Path]) -> dict:
                 "evidence": [],
             }
         )
+    markers = infra_markers(root)
+    findings = [
+        {
+            "id": "semantic-derivation-required",
+            "severity": "blocker",
+            "status": "open",
+            "message": "Classify every execution-relevant obligation and construct the stage graph.",
+            "source": None,
+            "resolution": "Complete semantic derivation, reconcile verification, and validate the contract.",
+        }
+    ]
+    if markers:
+        findings.append({
+            "id": "live-infrastructure-health-check",
+            "severity": "blocker",
+            "status": "open",
+            "message": ("This repository drives live infrastructure (" + ", ".join(markers[:5]) +
+                        "). A specstride loop without a health check cannot see it fail "
+                        "(feature 004, 2026-10-13: a 4-hour replay on a lab with a dead bgp unit)."),
+            "source": None,
+            "resolution": ("Pass \"--health-cmd\", \"<executable>\" on every specstride stage (an existing "
+                           "repo health script), or \"--health-cmd\", \"auto\" so the proposer writes and "
+                           "owns it; or set configuration.health_check {\"mode\": \"none\", \"reason\": ...}."),
+        })
     source = coverage[0]["source"] if coverage else {
         "path": sources[0]["path"] if sources else ".",
         "line": 1,
@@ -354,6 +379,7 @@ def build_contract(root: Path, features: list[Path]) -> dict:
             "shell_candidates": candidates,
             "prerequisites": prerequisites,
             "verification_documents": verification,
+            "infra_markers": markers,
         },
         "configuration": {
             "color": "auto",
@@ -363,16 +389,7 @@ def build_contract(root: Path, features: list[Path]) -> dict:
             "telemetry": {"loki": {"enabled": False}, "otel": {"enabled": False}},
         },
         "coverage": coverage,
-        "findings": [
-            {
-                "id": "semantic-derivation-required",
-                "severity": "blocker",
-                "status": "open",
-                "message": "Classify every execution-relevant obligation and construct the stage graph.",
-                "source": source,
-                "resolution": "Complete semantic derivation, reconcile verification, and validate the contract.",
-            }
-        ],
+        "findings": [dict(finding, source=source) for finding in findings],
         "stages": [],
     }
 

@@ -58,7 +58,21 @@ Every entry needs a unique `id`, the tasks.md `phase` whose gate runs it (a posi
 integer), `executable` and `args` exactly as declared, an absolute existing `cwd`, and a
 positive `timeoutSec`; `env` is optional. A relative plan path resolves from the stage `cwd`.
 Strict validation refuses a plan that is missing, empty or not in this shape, because
-Specstride would refuse it only once the launch is live.
+Specstride would refuse it only once the launch is live. It also refuses an `args[0]` that
+repeats the executable (`bash bash -c …` exits 126 on every gate).
+
+## Live infrastructure health
+
+A repository with live-infrastructure markers (`*.clab.yml`, `kind-config*.yaml`,
+`Vagrantfile`, `provision.sh`; recorded as `inventory.infra_markers`) must not run blind.
+Strict validation then requires every `specstride` stage to pass a health check —
+`"--health-cmd", "<executable>"` (resolved from the stage `cwd`, must be executable) or
+`"--health-cmd", "auto"` (or `action.env.SPECSTRIDE_HEALTH_CMD`) — unless the contract
+declares `configuration.health_check: {"mode": "none", "reason": "<why>"}`. With `auto`
+the proposer writes and owns `<state>/features/<feature>/health-check`; Specstride runs
+the check before every pass and during yield waits. The supervisor's gate runs every
+stage's check once before launch (`[MOL-GATE] check=infra-healthy`); a failure refuses
+the launch with the check's output. An `auto` check not yet written does not block it.
 
 ## Stages
 
